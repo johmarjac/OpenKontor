@@ -13,6 +13,13 @@ mit beliebig vielen Arbeitsplätzen, oder als Einzelplatz.
 > Haufe-Lexware; „Lexware“ ist eine Marke ihres Inhabers und wird hier nur zum Vergleich genannt.
 > Die Software ersetzt keine Steuerberatung – bitte Auswertungen vor der Abgabe prüfen.
 
+**Warum „OpenKontor“?** Ein *Kontor* ist das alte Wort für die Schreibstube eines Kaufmanns –
+der Raum, in dem Rechnungen geschrieben, Bücher geführt und Zahlungen verbucht wurden. Bekannt
+sind die Kontore der Hanse in Bergen, London oder Brügge; im Norden sagt man bis heute „Kontor“
+für Büro. Das Wort kommt über das niederländische *kantoor* vom französischen *comptoir*
+(Zahltisch), dahinter steckt das lateinische *computare*, „rechnen“. *Open* steht für freie,
+quelloffene Software: ein offenes Kontor für jede kleine Firma.
+
 **Herunterladen:** fertige Programme für Windows (x64 und ARM), macOS (Apple Silicon und
 Intel), Linux (x64 und ARM) sowie ein Docker-Image für den Server gibt es unter
 [Releases](https://github.com/johmarjac/OpenKontor/releases).
