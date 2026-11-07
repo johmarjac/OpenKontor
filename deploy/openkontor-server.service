@@ -1,0 +1,25 @@
+[Unit]
+Description=OpenKontor Server (Rechnungen & Buchhaltung)
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+User=openkontor
+Group=openkontor
+# Datenbank-Zugang und Port stehen hier (vom Installationsskript angelegt):
+#   OPENKONTOR_DATABASE_URL=postgres://openkontor:PASSWORT@localhost/openkontor
+#   OPENKONTOR_PORT=8470
+EnvironmentFile=/etc/openkontor/server.env
+ExecStart=/usr/local/bin/openkontor-server --data /var/lib/openkontor --name "Firmenserver"
+Restart=on-failure
+RestartSec=5
+
+# Abschottung
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/openkontor
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

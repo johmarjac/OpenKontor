@@ -1,0 +1,39 @@
+# Builds and tests OpenKontor on every change: the workplace program on Linux,
+# Windows and macOS, and the console server on its own (as on a Linux server).
+name: Bauen und testen
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  arbeitsplatz:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Bibliotheken für das Fenster (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev
+      - name: Bauen
+        run: cargo build --locked
+      - name: Testen
+        run: cargo test --locked
+
+  server:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Server ohne Fenster-Bibliotheken bauen
+        run: cargo build --locked --release --no-default-features --bin openkontor-server
+      - name: Server testen
+        run: cargo test --locked --no-default-features --bin openkontor-server
+      - uses: actions/upload-artifact@v4
+        with:
+          name: openkontor-server-linux
+          path: target/release/openkontor-server

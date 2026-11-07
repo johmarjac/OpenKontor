@@ -1,0 +1,35 @@
+# OpenKontor server with its own PostgreSQL database.
+#   cd deploy && docker compose up -d
+# Change the password in both places before the first start.
+services:
+  db:
+    image: postgres:17
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: openkontor
+      POSTGRES_PASSWORD: bitte-aendern
+      POSTGRES_DB: openkontor
+    volumes:
+      - db-data:/var/lib/postgresql/data
+
+  server:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      - db
+    environment:
+      OPENKONTOR_DATABASE_URL: postgres://openkontor:bitte-aendern@db/openkontor
+      # Optional: Anmeldung mit Microsoft 365 (siehe SERVER-INSTALLATION.md)
+      # OPENKONTOR_SSO_TENANT: <Verzeichnis-ID>
+      # OPENKONTOR_SSO_CLIENT_ID: <Anwendungs-ID>
+      # OPENKONTOR_SSO_AUTO_ROLE: lesen
+    ports:
+      - "8470:8470"
+    volumes:
+      - backups:/data
+
+volumes:
+  db-data:
+  backups:

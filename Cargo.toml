@@ -1,0 +1,46 @@
+[package]
+name = "openkontor"
+version = "0.1.0"
+edition = "2024"
+description = "Freie Software für Rechnungen und Buchhaltung kleiner Firmen – Server und Arbeitsplätze"
+license = "AGPL-3.0-or-later"
+readme = "README.md"
+default-run = "openkontor"
+
+# `gui` builds the workplace window. The server alone needs no window libraries:
+#   cargo build --release --no-default-features --bin openkontor-server
+[features]
+default = ["gui"]
+gui = ["dep:eframe", "dep:rfd", "dep:image"]
+
+[[bin]]
+name = "openkontor"
+path = "src/main.rs"
+required-features = ["gui"]
+
+[[bin]]
+name = "openkontor-server"
+path = "src/bin/openkontor-server.rs"
+
+[dependencies]
+chrono = { version = "0.4.45", features = ["serde"] }
+dirs = "7.0.0"
+eframe = { version = "0.37.0", optional = true }
+flate2 = "1.1.11"
+getrandom = "0.4.3"
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png"], optional = true }
+lettre = { version = "0.11.23", default-features = false, features = ["builder", "smtp-transport", "rustls", "webpki-roots", "ring"] }
+lopdf = { version = "0.47.0", default-features = false }
+mail-parser = "1.0.1"
+postgres = { version = "0.19.14", features = ["with-chrono-0_4"] }
+rfd = { version = "0.18.0", optional = true }
+ring = "0.17.14"
+roxmltree = "0.21.2"
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+sha2 = "0.11.1"
+tiny_http = "0.12.0"
+ttf-parser = "0.25.1"
+ureq = { version = "3.5.1", features = ["json"] }
+webpki-roots = "1.0.11"

@@ -1,0 +1,12 @@
+# Build output
+/target
+
+# Pictures taken while developing (the ones for the project page live in docs/)
+/shots
+
+# Settings that only fit one computer (e.g. the path to the macOS build tools)
+/.cargo/config.toml
+
+# Operating system files
+.DS_Store
+Thumbs.db
