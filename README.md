@@ -177,6 +177,17 @@ Verglichen mit einer kaufmännischen Komplettlösung wie Lexware Premium/Pro, na
 - **Lohn und Gehalt** (Lohnabrechnung, Meldungen an Krankenkassen und Finanzamt).
 - **Warenwirtschaft:** Lagerbestand, Bestellungen, Auftragsbestätigungen, Lieferscheine.
 - **Mehrere Firmen (Mandanten)** auf einem Server.
+- **Smartphone und Tablet** (Android, iOS) – drei mögliche Wege:
+  1. *Web-App vom Server* (empfohlen als erster Schritt): eine schlanke, fürs Handy gestaltete
+     Oberfläche, die der OpenKontor-Server selbst ausliefert und die man im Browser „zum
+     Startbildschirm hinzufügt“. Läuft auf Android und iPhone ohne App-Store, ideal für
+     Belege abfotografieren (Texterkennung macht der Server), offene Rechnungen, Mahnen,
+     Ausgaben erfassen und Kontakte nachschlagen.
+  2. *Eigene Mobil-App* mit demselben Rust-Kern und egui (Android über das NDK, iOS über
+     Xcode): wiederverwendbar, braucht aber eine eigene, berührungsfreundliche Oberfläche und
+     für die Stores ein Apple-Entwicklerkonto (99 $/Jahr) bzw. ein Google-Play-Konto (25 $ einmalig).
+  3. *Desktop-Oberfläche auf dem Tablet:* technisch möglich, aber für kleine Bildschirme und
+     Fingerbedienung nicht gemacht.
 
 **5. Technik und Sicherheit**
 - HTTPS direkt im Server, Zwei-Faktor-Anmeldung, feinere Rechte (z. B. nur Rechnungen).
