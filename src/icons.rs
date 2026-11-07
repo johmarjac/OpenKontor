@@ -26,6 +26,10 @@ pub enum Icon {
     Inbox,
     ArrowUp,
     Server,
+    Bank,
+    Repeat,
+    Lock,
+    Download,
 }
 
 struct Pen<'a> {
@@ -193,6 +197,29 @@ pub fn paint_icon(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
             pen.rect(3.5, 13.5, 20.5, 20.5, 1.5);
             pen.dot(7.0, 7.0, 0.9);
             pen.dot(7.0, 17.0, 0.9);
+        }
+        Icon::Bank => {
+            pen.closed(&[(3.0, 9.0), (12.0, 3.5), (21.0, 9.0)]);
+            for x in [6.0, 10.0, 14.0, 18.0] {
+                pen.line(&[(x, 11.0), (x, 17.5)]);
+            }
+            pen.line(&[(3.0, 20.5), (21.0, 20.5)]);
+        }
+        Icon::Repeat => {
+            pen.arc(12.0, 12.0, 7.5, 200.0, 350.0);
+            pen.line(&[(17.0, 6.0), (19.4, 10.0), (15.2, 10.6)]);
+            pen.arc(12.0, 12.0, 7.5, 20.0, 170.0);
+            pen.line(&[(7.0, 18.0), (4.6, 14.0), (8.8, 13.4)]);
+        }
+        Icon::Lock => {
+            pen.rect(5.0, 10.5, 19.0, 20.5, 2.0);
+            pen.arc(12.0, 10.5, 4.5, 180.0, 360.0);
+            pen.dot(12.0, 15.5, 1.2);
+        }
+        Icon::Download => {
+            pen.line(&[(12.0, 3.5), (12.0, 15.0)]);
+            pen.line(&[(7.0, 10.0), (12.0, 15.0), (17.0, 10.0)]);
+            pen.line(&[(4.0, 16.5), (4.0, 20.5), (20.0, 20.5), (20.0, 16.5)]);
         }
     }
 }

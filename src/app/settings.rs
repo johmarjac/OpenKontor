@@ -2,11 +2,24 @@
 
 use super::*;
 
+/// Two-factor sign-in and companies on the server, as shown in the settings.
+#[derive(Default)]
+pub struct SecurityState {
+    pub setup: Option<crate::server::TotpStart>,
+    pub code: String,
+    pub password: String,
+    pub tenants: Option<Vec<crate::server::TenantInfo>>,
+    pub new_tenant: String,
+}
+
 impl App {
     pub(super) fn settings(&mut self, ui: &mut Ui) {
         ui.horizontal(|ui| {
             ui.selectable_value(&mut self.settings_tab, SettingsTab::Firma, t("Firma & Belege"));
+            ui.selectable_value(&mut self.settings_tab, SettingsTab::Buchhaltung, t("Buchhaltung"));
             ui.selectable_value(&mut self.settings_tab, SettingsTab::Benutzer, t("Benutzer & Passwort"));
+            ui.selectable_value(&mut self.settings_tab, SettingsTab::Sicherheit, t("Sicherheit"));
+            ui.selectable_value(&mut self.settings_tab, SettingsTab::Mandanten, t("Mandanten"));
             ui.selectable_value(&mut self.settings_tab, SettingsTab::Daten, t("Verbindung & Datensicherung"));
             ui.selectable_value(&mut self.settings_tab, SettingsTab::Email, t("E-Mail"));
             ui.selectable_value(&mut self.settings_tab, SettingsTab::Sprache, t("Sprache"));
@@ -14,7 +27,10 @@ impl App {
         ui.add_space(10.0);
         ScrollArea::vertical().auto_shrink(false).show(ui, |ui| match self.settings_tab {
             SettingsTab::Firma => self.settings_company(ui),
+            SettingsTab::Buchhaltung => self.settings_accounting(ui),
             SettingsTab::Benutzer => self.settings_users(ui),
+            SettingsTab::Sicherheit => self.settings_security(ui),
+            SettingsTab::Mandanten => self.settings_tenants(ui),
             SettingsTab::Daten => self.settings_data(ui),
             SettingsTab::Sprache => self.settings_language(ui),
             SettingsTab::Email => self.settings_mail(ui),
@@ -78,6 +94,28 @@ impl App {
                 ui.label(muted(t(
                     "ZUGFeRD: PDF mit eingebetteten Rechnungsdaten – für die meisten Geschäftskunden. XRechnung: reine XML-Datei, vor allem für Behörden (mit Leitweg-ID). Pro Kontakt änderbar.",
                 )));
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    ui.label(muted(t("Logo")));
+                    match &c.logo {
+                        Some(l) => {
+                            ui.label(tf!("{} × {} Pixel", l.width, l.height));
+                            if ui.button(t("Entfernen")).clicked() {
+                                c.logo = None;
+                            }
+                        }
+                        None => {
+                            ui.label(muted(t("kein Logo")));
+                        }
+                    }
+                    if ui.button(t("Logo wählen …")).on_hover_text(t("PNG oder JPG; erscheint oben rechts auf Angeboten und Rechnungen.")).clicked() {
+                        match super::settings_more::pick_logo() {
+                            Some(Ok(logo)) => c.logo = Some(logo),
+                            Some(Err(e)) => self.toast = Some((e, true, 0.0)),
+                            None => {}
+                        }
+                    }
+                });
             });
         });
         ui.add_space(12.0);
@@ -93,6 +131,9 @@ impl App {
                             ("Rechnungen", &mut c.invoice_prefix, &mut c.next_invoice_no),
                             ("Angebote", &mut c.offer_prefix, &mut c.next_offer_no),
                             ("Gutschriften", &mut c.credit_prefix, &mut c.next_credit_no),
+                            ("Auftragsbestätigungen", &mut c.order_prefix, &mut c.next_order_no),
+                            ("Lieferscheine", &mut c.delivery_prefix, &mut c.next_delivery_no),
+                            ("Bestellungen", &mut c.purchase_prefix, &mut c.next_purchase_no),
                         ] {
                             ui.label(muted(t(label)));
                             ui.add_sized([120.0, 28.0], TextEdit::singleline(prefix));
@@ -252,8 +293,8 @@ impl App {
                             egui::ComboBox::from_id_salt(("role", &u.name))
                                 .selected_text(role.label())
                                 .show_ui(ui, |ui| {
-                                    for r in [Role::Admin, Role::Buchhaltung, Role::Lesen] {
-                                        ui.selectable_value(&mut role, r, r.label());
+                                    for r in Role::ALL {
+                                        ui.selectable_value(&mut role, r, r.label()).on_hover_text(r.hint());
                                     }
                                 });
                             if role != u.role {
@@ -261,6 +302,13 @@ impl App {
                             }
                             if u.sso_only {
                                 ui.label(muted(t("Microsoft 365")));
+                            } else if u.totp {
+                                if ui.small_button(t("2-Faktor aus")).on_hover_text(t("Für Kollegen, die ihr Handy verloren haben")).clicked() {
+                                    msg = Some(remote.totp_disable(&u.name, "").map(|_| tf!("Zwei-Faktor-Anmeldung für {} ausgeschaltet.", u.name)));
+                                    reload = true;
+                                }
+                            } else {
+                                ui.label("");
                             }
                             if u.name == remote.user {
                                 ui.label(muted(t("(Sie)")));
@@ -302,8 +350,8 @@ impl App {
                     egui::ComboBox::from_id_salt("new_role")
                         .selected_text(self.new_user.1.label())
                         .show_ui(ui, |ui| {
-                            for r in [Role::Admin, Role::Buchhaltung, Role::Lesen] {
-                                ui.selectable_value(&mut self.new_user.1, r, r.label());
+                            for r in Role::ALL {
+                                ui.selectable_value(&mut self.new_user.1, r, r.label()).on_hover_text(r.hint());
                             }
                         });
                     if primary(ui, t("Speichern")).clicked() {
@@ -320,7 +368,7 @@ impl App {
                     );
                 }
                 ui.label(muted(
-                    t("Rollen: Administrator (alles, auch Benutzer und Datensicherung) · Buchhaltung (Belege und Buchungen) · Nur lesen."),
+                    t("Rollen: Administrator (alles) · Buchhaltung (alles außer Benutzern) · Vertrieb (Kontakte, Artikel, Angebote, Rechnungen, Lager) · Belegerfassung (nur Belege einreichen) · Nur lesen."),
                 ));
             });
         }
@@ -386,6 +434,33 @@ impl App {
             if ui.button(t("Abmelden / Verbindung wechseln")).clicked() {
                 sign_out = true;
             }
+        });
+        ui.add_space(12.0);
+        card(ui, |ui| {
+            ui.set_width(ui.available_width().min(840.0));
+            card_title(ui, t("Updates"));
+            ui.label(muted(tf!("Installierte Version: {}", env!("CARGO_PKG_VERSION"))));
+            if ui.checkbox(&mut self.cfg.check_updates, t("Beim Start nach neuen Versionen suchen (GitHub)")).changed() {
+                self.cfg.save();
+            }
+            ui.horizontal(|ui| {
+                if ui.button(t("Jetzt suchen")).clicked() {
+                    self.update_rx = Some(export::check_for_update());
+                }
+                match &self.update {
+                    Some((v, url)) => {
+                        if ui.link(tf!("Version {} herunterladen", v)).clicked() {
+                            export::open_url(url);
+                        }
+                    }
+                    None if self.update_rx.is_none() => {
+                        ui.label(muted(t("Keine neuere Version gefunden.")));
+                    }
+                    None => {
+                        ui.spinner();
+                    }
+                }
+            });
         });
         ui.add_space(12.0);
         let admin = self.backend.is_admin();

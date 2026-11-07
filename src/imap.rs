@@ -40,6 +40,8 @@ pub struct InboxSettings {
     pub password: String,
     pub folder: String,
     pub interval_minutes: u32,
+    /// Microsoft 365: sign in as an app instead of with the password.
+    pub microsoft: crate::oauth_mail::OAuthApp,
     /// Last check and its result, for display.
     pub last_check: String,
     pub last_result: String,
@@ -56,6 +58,7 @@ impl Default for InboxSettings {
             password: String::new(),
             folder: "INBOX".into(),
             interval_minutes: 5,
+            microsoft: Default::default(),
             last_check: String::new(),
             last_result: String::new(),
         }
@@ -230,8 +233,14 @@ pub fn attachments(raw: &[u8]) -> Vec<Fetched> {
 /// Fetches unread e-mails, returns their receipt attachments and marks them as read.
 pub fn fetch(settings: &InboxSettings) -> Result<(Vec<Fetched>, usize), String> {
     let mut c = Conn::open(settings)?;
-    c.command(&format!("LOGIN {} {}", quote(settings.username.trim()), quote(&settings.password)))
-        .map_err(|e| format!("Anmeldung am Postfach fehlgeschlagen ({e})."))?;
+    if settings.microsoft.is_set() {
+        let token = crate::oauth_mail::token(&settings.microsoft)?;
+        c.command(&format!("AUTHENTICATE XOAUTH2 {}", crate::oauth_mail::xoauth2(settings.username.trim(), &token)))
+            .map_err(|e| format!("Anmeldung am Microsoft-365-Postfach fehlgeschlagen ({e})."))?;
+    } else {
+        c.command(&format!("LOGIN {} {}", quote(settings.username.trim()), quote(&settings.password)))
+            .map_err(|e| format!("Anmeldung am Postfach fehlgeschlagen ({e})."))?;
+    }
     let folder = if settings.folder.trim().is_empty() { "INBOX" } else { settings.folder.trim() };
     c.command(&format!("SELECT {}", quote(folder)))?;
     let (lines, _) = c.command("UID SEARCH UNSEEN")?;

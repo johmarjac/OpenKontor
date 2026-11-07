@@ -555,6 +555,7 @@ impl App {
                 ui.end_row();
             });
             ui.label(muted(t("Microsoft 365: outlook.office365.com · Google: imap.gmail.com (mit App-Passwort) · IONOS: imap.ionos.de")));
+            super::settings_more::microsoft_app_editor(ui, "inbox_ms", &mut s.microsoft, *password_set, "IMAP.AccessAsApp");
             if !s.last_check.is_empty() {
                 ui.label(muted(tf!("Letzter Abruf: {} – {}", s.last_check, tr(&s.last_result))));
             }

@@ -64,3 +64,46 @@ pub fn open_file(path: &std::path::Path) {
     #[cfg(all(unix, not(target_os = "macos")))]
     let _ = std::process::Command::new("xdg-open").arg(path).spawn();
 }
+
+/// Where new versions are published.
+pub const RELEASES_API: &str = "https://api.github.com/repos/johmarjac/OpenKontor/releases/latest";
+
+/// Whether version `a` ("0.2.0" or "v0.2.0") is newer than `b`.
+pub fn is_newer(a: &str, b: &str) -> bool {
+    let parts = |v: &str| -> Vec<u32> { v.trim_start_matches('v').split('.').map(|p| p.parse().unwrap_or(0)).collect() };
+    parts(a) > parts(b)
+}
+
+/// Looks on GitHub for a newer release (in the background). Sends the version and the
+/// address of its download page, or nothing if this is the newest (or GitHub is unreachable).
+pub fn check_for_update() -> std::sync::mpsc::Receiver<Option<(String, String)>> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        #[derive(serde::Deserialize)]
+        struct Release {
+            tag_name: String,
+            html_url: String,
+        }
+        let config = ureq::Agent::config_builder().timeout_global(Some(std::time::Duration::from_secs(8))).build();
+        let found = ureq::Agent::new_with_config(config)
+            .get(RELEASES_API)
+            .header("User-Agent", "OpenKontor")
+            .call()
+            .ok()
+            .and_then(|mut r| r.body_mut().read_json::<Release>().ok())
+            .filter(|r| is_newer(&r.tag_name, env!("CARGO_PKG_VERSION")))
+            .map(|r| (r.tag_name.trim_start_matches('v').to_string(), r.html_url));
+        let _ = tx.send(found);
+    });
+    rx
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn version_order() {
+        assert!(super::is_newer("v0.2.0", "0.1.9"));
+        assert!(super::is_newer("1.0.0", "0.9.12"));
+        assert!(!super::is_newer("v0.1.0", "0.1.0"));
+    }
+}

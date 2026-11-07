@@ -226,24 +226,40 @@ pub fn build(data: &Data, doc: &Document, profile: Profile) -> Result<String, Ve
 
     push("  <rsm:ExchangedDocument>");
     push(&format!("    <ram:ID>{}</ram:ID>", esc(&doc.number)));
-    push(&format!("    <ram:TypeCode>{}</ram:TypeCode>", if credit { 381 } else { 380 }));
+    // 326 = partial (advance) invoice, 380 = invoice, 381 = credit note.
+    let type_code = if credit {
+        381
+    } else if doc.part == InvoicePart::Abschlag {
+        326
+    } else {
+        380
+    };
+    push(&format!("    <ram:TypeCode>{type_code}</ram:TypeCode>"));
     push(&format!("    <ram:IssueDateTime><udt:DateTimeString format=\"102\">{}</udt:DateTimeString></ram:IssueDateTime>", date(doc.date)));
     for note in [&doc.title, &doc.intro, &doc.service_date].iter().filter(|s| !s.trim().is_empty()) {
         push(&format!("    <ram:IncludedNote><ram:Content>{}</ram:Content></ram:IncludedNote>", esc(note.trim())));
     }
     if small {
         push("    <ram:IncludedNote><ram:Content>Gemäß § 19 UStG wird keine Umsatzsteuer berechnet.</ram:Content></ram:IncludedNote>");
+    } else if let Some(note) = doc.vat_case.invoice_note() {
+        push(&format!("    <ram:IncludedNote><ram:Content>{}</ram:Content></ram:IncludedNote>", esc(note)));
     }
+    let case = if small { VatCase::Inland } else { doc.vat_case };
+    // "Not subject to VAT" invoices carry no VAT identifiers (BR-O-2).
+    let show_vat_ids = case != VatCase::DrittlandLeistung;
     push("  </rsm:ExchangedDocument>");
 
     push("  <rsm:SupplyChainTradeTransaction>");
     for (i, (l, net)) in f.lines.iter().enumerate() {
-        let (cat, rate) = vat_category(small, l.vat);
+        let (cat, rate) = vat_category(small, case, l.vat);
+        let rate = rate_element(cat, &rate);
+        // Prices are never negative; a deduction is a negative quantity instead.
+        let (price, qty) = if l.price_net < 0 { (-l.price_net, -l.qty) } else { (l.price_net, l.qty) };
         push("    <ram:IncludedSupplyChainTradeLineItem>");
         push(&format!("      <ram:AssociatedDocumentLineDocument><ram:LineID>{}</ram:LineID></ram:AssociatedDocumentLineDocument>", i + 1));
         push(&format!("      <ram:SpecifiedTradeProduct><ram:Name>{}</ram:Name></ram:SpecifiedTradeProduct>", esc(l.text.trim())));
         push("      <ram:SpecifiedLineTradeAgreement>");
-        let gross_price = l.price_net as f64 / 100.0;
+        let gross_price = price as f64 / 100.0;
         let net_price = gross_price * (1.0 - l.discount_pct / 100.0);
         if l.discount_pct > 0.0 {
             push(&format!(
@@ -257,11 +273,11 @@ pub fn build(data: &Data, doc: &Document, profile: Profile) -> Result<String, Ve
         push(&format!(
             "      <ram:SpecifiedLineTradeDelivery><ram:BilledQuantity unitCode=\"{}\">{}</ram:BilledQuantity></ram:SpecifiedLineTradeDelivery>",
             unit_code(&l.unit),
-            decimal(l.qty)
+            decimal(qty)
         ));
         push("      <ram:SpecifiedLineTradeSettlement>");
         push(&format!(
-            "        <ram:ApplicableTradeTax><ram:TypeCode>VAT</ram:TypeCode><ram:CategoryCode>{cat}</ram:CategoryCode><ram:RateApplicablePercent>{rate}</ram:RateApplicablePercent></ram:ApplicableTradeTax>"
+            "        <ram:ApplicableTradeTax><ram:TypeCode>VAT</ram:TypeCode><ram:CategoryCode>{cat}</ram:CategoryCode>{rate}</ram:ApplicableTradeTax>"
         ));
         push(&format!("        <ram:SpecifiedTradeSettlementLineMonetarySummation><ram:LineTotalAmount>{}</ram:LineTotalAmount></ram:SpecifiedTradeSettlementLineMonetarySummation>", amount(*net)));
         push("      </ram:SpecifiedLineTradeSettlement>");
@@ -275,6 +291,11 @@ pub fn build(data: &Data, doc: &Document, profile: Profile) -> Result<String, Ve
         push(&format!("      <ram:BuyerReference>{}</ram:BuyerReference>", esc(buyer_ref)));
     }
     push("      <ram:SellerTradeParty>");
+    if !show_vat_ids {
+        // Without a VAT id the seller needs another identifier (BR-CO-26).
+        let id = if c.tax_number.trim().is_empty() { c.name.trim() } else { c.tax_number.trim() };
+        push(&format!("        <ram:ID>{}</ram:ID>", esc(id)));
+    }
     push(&format!("        <ram:Name>{}</ram:Name>", esc(&c.name)));
     let contact_name = if c.owner.trim().is_empty() { c.name.trim() } else { c.owner.trim() };
     let mut contact = format!("        <ram:DefinedTradeContact><ram:PersonName>{}</ram:PersonName>", esc(contact_name));
@@ -293,7 +314,7 @@ pub fn build(data: &Data, doc: &Document, profile: Profile) -> Result<String, Ve
     if !c.tax_number.trim().is_empty() {
         push(&format!("        <ram:SpecifiedTaxRegistration><ram:ID schemeID=\"FC\">{}</ram:ID></ram:SpecifiedTaxRegistration>", esc(c.tax_number.trim())));
     }
-    if !c.vat_id.trim().is_empty() {
+    if !c.vat_id.trim().is_empty() && show_vat_ids {
         push(&format!("        <ram:SpecifiedTaxRegistration><ram:ID schemeID=\"VA\">{}</ram:ID></ram:SpecifiedTaxRegistration>", esc(&c.vat_id.replace(' ', ""))));
     }
     push("      </ram:SellerTradeParty>");
@@ -309,7 +330,7 @@ pub fn build(data: &Data, doc: &Document, profile: Profile) -> Result<String, Ve
     if !k.email.trim().is_empty() {
         push(&format!("        <ram:URIUniversalCommunication><ram:URIID schemeID=\"EM\">{}</ram:URIID></ram:URIUniversalCommunication>", esc(k.email.trim())));
     }
-    if !k.vat_id.trim().is_empty() {
+    if !k.vat_id.trim().is_empty() && show_vat_ids {
         push(&format!("        <ram:SpecifiedTaxRegistration><ram:ID schemeID=\"VA\">{}</ram:ID></ram:SpecifiedTaxRegistration>", esc(&k.vat_id.replace(' ', ""))));
     }
     push("      </ram:BuyerTradeParty>");
@@ -317,8 +338,17 @@ pub fn build(data: &Data, doc: &Document, profile: Profile) -> Result<String, Ve
 
     // Delivery date: the stated service date if it is a date, else the invoice date.
     let delivered = parse_date(&doc.service_date).unwrap_or(doc.date);
+    // Intra-community deliveries name the country the goods go to (BR-IC-12).
+    let ship_to = if case == VatCase::IgLieferung {
+        format!(
+            "<ram:ShipToTradeParty>{}</ram:ShipToTradeParty>",
+            address(&k.street, &k.zip_city, &country_code(&k.country)).trim()
+        )
+    } else {
+        String::new()
+    };
     push(&format!(
-        "    <ram:ApplicableHeaderTradeDelivery><ram:ActualDeliverySupplyChainEvent><ram:OccurrenceDateTime><udt:DateTimeString format=\"102\">{}</udt:DateTimeString></ram:OccurrenceDateTime></ram:ActualDeliverySupplyChainEvent></ram:ApplicableHeaderTradeDelivery>",
+        "    <ram:ApplicableHeaderTradeDelivery>{ship_to}<ram:ActualDeliverySupplyChainEvent><ram:OccurrenceDateTime><udt:DateTimeString format=\"102\">{}</udt:DateTimeString></ram:OccurrenceDateTime></ram:ActualDeliverySupplyChainEvent></ram:ApplicableHeaderTradeDelivery>",
         date(delivered)
     ));
 
@@ -336,13 +366,19 @@ pub fn build(data: &Data, doc: &Document, profile: Profile) -> Result<String, Ve
     means.push_str("</ram:SpecifiedTradeSettlementPaymentMeans>");
     push(&means);
     for (rate, net, tax) in &f.by_rate {
-        let (cat, rate_text) = vat_category(small, *rate);
+        let (cat, rate_text) = vat_category(small, case, *rate);
+        // The breakdown always names a rate (BR-DE-14), 0 when not subject to VAT.
+        let rate_text = format!("<ram:RateApplicablePercent>{}</ram:RateApplicablePercent>", if rate_text.is_empty() { "0" } else { &rate_text });
         let reason = match cat {
             "E" => "<ram:ExemptionReason>Kein Ausweis von Umsatzsteuer, da Kleinunternehmer gemäß § 19 UStG</ram:ExemptionReason>",
+            "K" => "<ram:ExemptionReason>Steuerfreie innergemeinschaftliche Lieferung (§ 4 Nr. 1b UStG)</ram:ExemptionReason>",
+            "AE" => "<ram:ExemptionReason>Steuerschuldnerschaft des Leistungsempfängers</ram:ExemptionReason>",
+            "G" => "<ram:ExemptionReason>Steuerfreie Ausfuhrlieferung (§ 4 Nr. 1a UStG)</ram:ExemptionReason>",
+            "O" => "<ram:ExemptionReason>Im Inland nicht steuerbare Leistung</ram:ExemptionReason>",
             _ => "",
         };
         push(&format!(
-            "      <ram:ApplicableTradeTax><ram:CalculatedAmount>{}</ram:CalculatedAmount><ram:TypeCode>VAT</ram:TypeCode>{reason}<ram:BasisAmount>{}</ram:BasisAmount><ram:CategoryCode>{cat}</ram:CategoryCode><ram:RateApplicablePercent>{rate_text}</ram:RateApplicablePercent></ram:ApplicableTradeTax>",
+            "      <ram:ApplicableTradeTax><ram:CalculatedAmount>{}</ram:CalculatedAmount><ram:TypeCode>VAT</ram:TypeCode>{reason}<ram:BasisAmount>{}</ram:BasisAmount><ram:CategoryCode>{cat}</ram:CategoryCode>{rate_text}</ram:ApplicableTradeTax>",
             amount(*tax),
             amount(*net)
         ));
@@ -388,13 +424,23 @@ pub fn build(data: &Data, doc: &Document, profile: Profile) -> Result<String, Ve
     Ok(x)
 }
 
-/// VAT category code and rate text: S standard, Z zero rate, E exempt (small business).
-fn vat_category(small: bool, rate: u8) -> (&'static str, String) {
-    match (small, rate) {
-        (true, _) => ("E", "0".into()),
-        (false, 0) => ("Z", "0".into()),
-        (false, r) => ("S", r.to_string()),
+/// VAT category code and rate text: S standard, Z zero rate, E exempt (small business),
+/// K intra-community supply, AE reverse charge, G export, O not subject to VAT.
+fn vat_category(small: bool, case: VatCase, rate: u8) -> (&'static str, String) {
+    match (small, case, rate) {
+        (true, _, _) => ("E", "0".into()),
+        (false, VatCase::IgLieferung, _) => ("K", "0".into()),
+        (false, VatCase::ReverseCharge, _) => ("AE", "0".into()),
+        (false, VatCase::Ausfuhr, _) => ("G", "0".into()),
+        (false, VatCase::DrittlandLeistung, _) => ("O", String::new()),
+        (false, VatCase::Inland, 0) => ("Z", "0".into()),
+        (false, VatCase::Inland, r) => ("S", r.to_string()),
     }
+}
+
+/// The rate element; "not subject to VAT" has none (BR-O-5).
+fn rate_element(cat: &str, rate: &str) -> String {
+    if cat == "O" { String::new() } else { format!("<ram:RateApplicablePercent>{rate}</ram:RateApplicablePercent>") }
 }
 
 fn address(street: &str, zip_city: &str, country: &str) -> String {
@@ -469,6 +515,10 @@ mod tests {
         std::fs::write(format!("{dir}/xrechnung.xml"), build(&data, &doc, Profile::XRechnung).unwrap()).unwrap();
         std::fs::write(format!("{dir}/en16931.xml"), build(&data, &doc, Profile::En16931).unwrap()).unwrap();
         std::fs::write(format!("{dir}/zugferd.pdf"), crate::pdf::zugferd_pdf(&data, &doc).unwrap()).unwrap();
+        let mut with_logo = data.clone();
+        let rgb: Vec<u8> = (0..60 * 20).flat_map(|i| if (i % 60) < 30 { [31, 111, 139] } else { [47, 179, 156] }).collect();
+        with_logo.company.logo = Some(crate::pdf::make_logo(60, 20, &rgb));
+        std::fs::write(format!("{dir}/zugferd-logo.pdf"), crate::pdf::zugferd_pdf(&with_logo, &doc).unwrap()).unwrap();
         let mut credit = doc.clone();
         credit.kind = DocKind::Gutschrift;
         credit.number = "GS-2026-0001".into();
@@ -477,6 +527,35 @@ mod tests {
         let mut small = data.clone();
         small.company.small_business = true;
         std::fs::write(format!("{dir}/kleinunternehmer.xml"), build(&small, &doc, Profile::XRechnung).unwrap()).unwrap();
+        // EU and export cases: a customer in Austria and one in Switzerland.
+        let mut eu = data.clone();
+        let cid = doc.contact_id.unwrap();
+        let k = eu.contacts.iter_mut().find(|c| c.id == cid).unwrap();
+        k.country = "Österreich".into();
+        k.zip_city = "1010 Wien".into();
+        k.vat_id = "ATU12345678".into();
+        for (case, name) in [
+            (VatCase::IgLieferung, "eu-lieferung"),
+            (VatCase::ReverseCharge, "eu-reverse-charge"),
+            (VatCase::Ausfuhr, "ausfuhr"),
+            (VatCase::DrittlandLeistung, "drittland-leistung"),
+        ] {
+            let mut d = doc.clone();
+            d.vat_case = case;
+            std::fs::write(format!("{dir}/{name}.xml"), build(&eu, &d, Profile::XRechnung).unwrap()).unwrap();
+        }
+        // Advance invoice and final invoice with the deduction.
+        let mut advance = doc.clone();
+        advance.part = InvoicePart::Abschlag;
+        advance.number = "RE-2026-0101".into();
+        std::fs::write(format!("{dir}/abschlag.xml"), build(&data, &advance, Profile::XRechnung).unwrap()).unwrap();
+        let mut last = doc.clone();
+        last.part = InvoicePart::Schluss;
+        last.number = "RE-2026-0102".into();
+        last.lines.push(Line { text: "abzüglich Abschlagsrechnung RE-2026-0101".into(), qty: 1.0, unit: "Pauschal".into(), price_net: -10000, vat: 19, ..Line::default() });
+        let xml = build(&data, &last, Profile::XRechnung).unwrap();
+        assert!(xml.contains("<ram:BilledQuantity unitCode=\"LS\">-1</ram:BilledQuantity>") || xml.contains(">-1<"));
+        std::fs::write(format!("{dir}/schluss.xml"), xml).unwrap();
     }
 
     #[test]

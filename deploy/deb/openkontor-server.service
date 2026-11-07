@@ -1,0 +1,27 @@
+[Unit]
+Description=OpenKontor Server (Rechnungen & Buchhaltung)
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+User=openkontor
+Group=openkontor
+# Datenbank, Port und HTTPS stehen hier, z. B.:
+#   OPENKONTOR_DATABASE_URL=postgres://openkontor:PASSWORT@localhost/openkontor
+#   OPENKONTOR_PORT=8470
+#   OPENKONTOR_TLS_CERT=/etc/letsencrypt/live/kontor.example.de/fullchain.pem
+#   OPENKONTOR_TLS_KEY=/etc/letsencrypt/live/kontor.example.de/privkey.pem
+EnvironmentFile=-/etc/openkontor/server.env
+ExecStart=/usr/bin/openkontor-server --data /var/lib/openkontor --name "Firmenserver"
+Restart=on-failure
+RestartSec=5
+
+# Abschottung
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/openkontor
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

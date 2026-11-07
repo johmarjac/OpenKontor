@@ -1,12 +1,18 @@
 //! The workplace window: sign-in, navigation and the overview.
 //! The other sections live in the submodules.
 
+mod bank;
+mod books;
 mod documents;
 mod mailing;
 mod receipts;
+mod recurring;
 mod reports;
 mod sections;
 mod settings;
+mod settings_more;
+mod statements;
+mod stock;
 
 use crate::backend::{Backend, ClientConfig, Remote};
 use crate::export;
@@ -33,6 +39,7 @@ pub enum Section {
     Artikel,
     Belege,
     Buchhaltung,
+    Bank,
     Belegeingang,
     Auswertungen,
     Protokoll,
@@ -40,12 +47,13 @@ pub enum Section {
 }
 
 impl Section {
-    const ALL: [Section; 9] = [
+    const ALL: [Section; 10] = [
         Section::Start,
         Section::Kontakte,
         Section::Artikel,
         Section::Belege,
         Section::Buchhaltung,
+        Section::Bank,
         Section::Belegeingang,
         Section::Auswertungen,
         Section::Protokoll,
@@ -58,6 +66,7 @@ impl Section {
             Section::Artikel => "Artikel & Leistungen",
             Section::Belege => "Angebote & Rechnungen",
             Section::Buchhaltung => "Einnahmen & Ausgaben",
+            Section::Bank => "Bank",
             Section::Belegeingang => "Belegeingang",
             Section::Auswertungen => "Auswertungen",
             Section::Protokoll => "Protokoll",
@@ -71,6 +80,7 @@ impl Section {
             Section::Artikel => Icon::Package,
             Section::Belege => Icon::Document,
             Section::Buchhaltung => Icon::Wallet,
+            Section::Bank => Icon::Bank,
             Section::Belegeingang => Icon::Inbox,
             Section::Auswertungen => Icon::Chart,
             Section::Protokoll => Icon::History,
@@ -126,15 +136,22 @@ impl Period {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ReportTab {
     Euer,
+    AnlageEuer,
     Ustva,
+    Zm,
+    Bilanz,
     OffenePosten,
     Kunden,
+    Exporte,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SettingsTab {
     Firma,
+    Buchhaltung,
     Benutzer,
+    Sicherheit,
+    Mandanten,
     Daten,
     Sprache,
     Email,
@@ -188,6 +205,14 @@ pub struct App {
     receipts: receipts::ReceiptsState,
     /// Early-payment discount to deduct when booking the payment.
     doc_paid_discount: f64,
+    /// Amount and way of the payment being booked (part payments).
+    doc_pay_amount: Cents,
+    doc_pay_method: String,
+    /// Share of an advance invoice, in percent.
+    advance_pct: f64,
+    /// Showing the recurring invoices instead of the documents.
+    doc_view_recurring: bool,
+    recurring_edit: Option<Recurring>,
 
     booking_search: String,
     booking_kind: Option<BookingKind>,
@@ -212,6 +237,22 @@ pub struct App {
     /// A running Microsoft 365 sign-in in the browser.
     sso_rx: Option<Receiver<Result<crate::sso_client::SsoResult, String>>>,
     sso_cancel: Arc<AtomicBool>,
+
+    /// Code from the authenticator app at sign-in, once the server asks for it.
+    totp_code: String,
+    need_code: bool,
+    /// Companies offered by the server at the address typed in.
+    server_info: Option<crate::backend::ServerInfo>,
+    info_for: String,
+    info_rx: Option<Receiver<(String, Result<crate::backend::ServerInfo, String>)>>,
+    /// A newer version on GitHub: (version, address of the download page).
+    update: Option<(String, String)>,
+    update_rx: Option<Receiver<Option<(String, String)>>>,
+
+    bank: bank::BankState,
+    books: books::BooksState,
+    stock: stock::StockState,
+    security: settings::SecurityState,
 
     shot: Option<Shot>,
     frames: u64,
@@ -262,6 +303,11 @@ impl App {
             mail_state: Default::default(),
             receipts: receipts::ReceiptsState { filter: Some(ReceiptStatus::Neu), ..Default::default() },
             doc_paid_discount: 0.0,
+            doc_pay_amount: 0,
+            doc_pay_method: "Bank".into(),
+            advance_pct: 30.0,
+            doc_view_recurring: false,
+            recurring_edit: None,
             booking_search: String::new(),
             booking_kind: None,
             booking_year: today.year(),
@@ -280,9 +326,23 @@ impl App {
             new_user_sso: false,
             sso_rx: None,
             sso_cancel: Arc::new(AtomicBool::new(false)),
+            totp_code: String::new(),
+            need_code: false,
+            server_info: None,
+            info_for: String::new(),
+            info_rx: None,
+            update: None,
+            update_rx: None,
+            bank: Default::default(),
+            books: Default::default(),
+            stock: Default::default(),
+            security: Default::default(),
             shot,
             frames: 0,
         };
+        if app.shot.is_none() && app.cfg.check_updates {
+            app.update_rx = Some(crate::export::check_for_update());
+        }
         if app.shot.is_some() {
             // Pictures always show the example company, unless the sign-in screen is asked for.
             if std::env::var("OPENKONTOR_SHOT_LOGIN").is_err() {
@@ -370,19 +430,71 @@ impl App {
     }
 
     fn connect(&mut self, ctx: &egui::Context) {
-        match Remote::connect(&self.cfg.server_url, &self.cfg.user, &self.password, ctx.clone()) {
+        let tenant = self.cfg.tenant.clone();
+        match Remote::connect(&self.cfg.server_url, &self.cfg.user, &self.password, &self.totp_code, &tenant, ctx.clone()) {
             Ok((remote, data)) => {
                 self.data = data;
-                self.info(tf!("Angemeldet bei {} als {}", remote.server_name, remote.user));
+                self.info(tf!("Angemeldet bei {} als {}", remote.tenant_name, remote.user));
                 self.backend = Backend::Remote(Box::new(remote));
                 self.screen = Screen::Main;
-                self.section = Section::Start;
+                self.section = self.first_section();
                 self.password.clear();
+                self.totp_code.clear();
+                self.need_code = false;
                 self.connect_error = None;
                 self.cfg.use_server = true;
                 self.cfg.save();
             }
-            Err(e) => self.connect_error = Some(e),
+            Err(e) => {
+                if let Some(msg) = e.strip_prefix(crate::backend::NEED_CODE) {
+                    self.need_code = true;
+                    self.connect_error = Some(tr(msg));
+                } else {
+                    self.connect_error = Some(tr(&e));
+                }
+            }
+        }
+    }
+
+    /// Where a user starts: people who only hand in receipts go straight to the inbox.
+    fn first_section(&self) -> Section {
+        if self.backend.allows(OpArea::Sales) || !self.backend.can_write() { Section::Start } else { Section::Belegeingang }
+    }
+
+    /// Sections the signed-in user may open.
+    fn section_visible(&self, s: Section) -> bool {
+        match s {
+            Section::Buchhaltung | Section::Bank => self.backend.allows(OpArea::Accounting) || !self.backend.can_write(),
+            Section::Belegeingang | Section::Einstellungen => true,
+            _ => self.backend.allows(OpArea::Sales) || !self.backend.can_write(),
+        }
+    }
+
+    /// Asks the server at the typed address for its name and companies (in the background).
+    fn probe_server(&mut self, ctx: &egui::Context) {
+        if let Some(rx) = &self.info_rx
+            && let Ok((url, r)) = rx.try_recv()
+        {
+            self.info_rx = None;
+            self.info_for = url;
+            self.server_info = r.ok();
+            if let Some(info) = &self.server_info
+                && !info.tenants.iter().any(|t| t.id == self.cfg.tenant)
+            {
+                self.cfg.tenant.clear();
+            }
+        }
+        if self.info_rx.is_none() && self.info_for != self.cfg.server_url && self.shot.is_none() {
+            let url = self.cfg.server_url.clone();
+            let (tx, rx) = channel();
+            let ctx = ctx.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(400));
+                let r = crate::backend::server_info(&url);
+                let _ = tx.send((url, r));
+                ctx.request_repaint();
+            });
+            self.info_rx = Some(rx);
         }
     }
 
@@ -406,14 +518,15 @@ impl App {
     }
 
     fn finish_sso(&mut self, ctx: &egui::Context, result: Result<crate::sso_client::SsoResult, String>) {
-        let connected = result.and_then(|proof| Remote::connect_sso(&self.cfg.server_url, &proof, ctx.clone()));
+        let tenant = self.cfg.tenant.clone();
+        let connected = result.and_then(|proof| Remote::connect_sso(&self.cfg.server_url, &proof, &tenant, ctx.clone()));
         match connected {
             Ok((remote, data)) => {
                 self.data = data;
-                self.info(tf!("Angemeldet bei {} als {}", remote.server_name, remote.user));
+                self.info(tf!("Angemeldet bei {} als {}", remote.tenant_name, remote.user));
                 self.backend = Backend::Remote(Box::new(remote));
                 self.screen = Screen::Main;
-                self.section = Section::Start;
+                self.section = self.first_section();
                 self.connect_error = None;
                 self.cfg.use_server = true;
                 self.cfg.save();
@@ -494,6 +607,8 @@ impl App {
         self.doc_edit = id.and_then(|id| self.data.documents.iter().find(|d| d.id == id).cloned());
         self.doc_paid_date = self.today;
         self.doc_paid_discount = self.doc_edit.as_ref().map(|d| d.discount_on(self.today)).unwrap_or(0.0);
+        self.doc_pay_amount = self.doc_edit.as_ref().map(|d| d.open_amount(self.data.company.small_business).abs()).unwrap_or(0);
+        self.doc_view_recurring = false;
         self.section = Section::Belege;
     }
 
@@ -591,6 +706,21 @@ fn doc_texts(kind: DocKind, lang: Lang, _days: u32) -> (String, String, String) 
             l("Vielen Dank für die gute Zusammenarbeit.").into(),
         ),
         DocKind::Gutschrift => (l("Gutschrift").into(), l("Wir schreiben Ihnen gut:").into(), String::new()),
+        DocKind::Auftragsbestaetigung => (
+            l("Auftragsbestätigung").into(),
+            l("Vielen Dank für Ihren Auftrag. Wir bestätigen Ihnen folgende Leistungen:").into(),
+            l("Wir freuen uns auf die weitere Zusammenarbeit.").into(),
+        ),
+        DocKind::Lieferschein => (
+            l("Lieferschein").into(),
+            l("Wir liefern Ihnen:").into(),
+            l("Ware vollständig und in einwandfreiem Zustand erhalten:").into(),
+        ),
+        DocKind::Bestellung => (
+            l("Bestellung").into(),
+            l("Hiermit bestellen wir:").into(),
+            l("Bitte bestätigen Sie uns den Liefertermin.").into(),
+        ),
     }
 }
 
@@ -635,6 +765,15 @@ impl eframe::App for App {
         {
             self.sso_rx = None;
             self.finish_sso(ctx, r);
+        }
+        if let Some(rx) = &self.update_rx
+            && let Ok(r) = rx.try_recv()
+        {
+            self.update_rx = None;
+            self.update = r;
+        }
+        if self.screen == Screen::Connect {
+            self.probe_server(ctx);
         }
         if let Some(shot) = &mut self.shot {
             ctx.request_repaint();
@@ -733,6 +872,23 @@ impl App {
                                 .spacing([12.0, 8.0])
                                 .show(ui, |ui| {
                                     text_row(ui, t("Serveradresse"), &mut self.cfg.server_url, 320.0);
+                                    if let Some(info) = &self.server_info
+                                        && info.tenants.len() > 1
+                                    {
+                                        ui.label(muted(t("Firma")));
+                                        let current = info
+                                            .tenants
+                                            .iter()
+                                            .find(|x| x.id == self.cfg.tenant)
+                                            .map(|x| x.name.clone())
+                                            .unwrap_or_else(|| info.tenants[0].name.clone());
+                                        egui::ComboBox::from_id_salt("login_tenant").width(320.0).selected_text(current).show_ui(ui, |ui| {
+                                            for x in &info.tenants {
+                                                ui.selectable_value(&mut self.cfg.tenant, x.id.clone(), &x.name);
+                                            }
+                                        });
+                                        ui.end_row();
+                                    }
                                     text_row(ui, t("Benutzer"), &mut self.cfg.user, 320.0);
                                     ui.label(muted(t("Passwort")));
                                     let r = ui.add(
@@ -740,10 +896,23 @@ impl App {
                                             .password(true)
                                             .desired_width(320.0),
                                     );
-                                    if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                                    if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) && !self.need_code {
                                         self.connect(&ctx);
                                     }
                                     ui.end_row();
+                                    if self.need_code {
+                                        ui.label(muted(t("Bestätigungscode")));
+                                        let r = ui.add(
+                                            TextEdit::singleline(&mut self.totp_code)
+                                                .hint_text(t("6 Ziffern aus der Authenticator-App"))
+                                                .desired_width(320.0),
+                                        );
+                                        r.request_focus();
+                                        if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                                            self.connect(&ctx);
+                                        }
+                                        ui.end_row();
+                                    }
                                 });
                             if let Some(e) = &self.connect_error {
                                 ui.label(RichText::new(e).color(RED));
@@ -856,7 +1025,8 @@ impl App {
                         self.documents(ui)
                     }
                 }
-                Section::Buchhaltung => self.bookings(ui),
+                Section::Buchhaltung => self.books_page(ui),
+                Section::Bank => self.bank_page(ui),
                 Section::Belegeingang => self.receipts_page(ui),
                 Section::Auswertungen => self.reports(ui),
                 Section::Protokoll => self.log(ui),
@@ -874,6 +1044,9 @@ impl App {
         });
         ui.add_space(22.0);
         for s in Section::ALL {
+            if !self.section_visible(s) {
+                continue;
+            }
             if s == Section::Protokoll {
                 ui.add_space(10.0);
                 ui.label(RichText::new(t("SYSTEM")).size(11.0).color(Color32::from_rgb(0x7f, 0x95, 0xab)));
@@ -906,8 +1079,12 @@ impl App {
                 egui::FontId::proportional(14.0),
                 color,
             );
-            if s == Section::Belegeingang {
-                let open = self.data.receipts.iter().filter(|r| r.status == ReceiptStatus::Neu).count();
+            if s == Section::Bank || s == Section::Belegeingang {
+                let open = if s == Section::Bank {
+                    self.data.bank.iter().filter(|t| t.status == BankStatus::Offen).count()
+                } else {
+                    self.data.receipts.iter().filter(|r| r.status == ReceiptStatus::Neu).count()
+                };
                 if open > 0 {
                     let center = rect.right_center() - vec2(20.0, 0.0);
                     p.circle_filled(center, 10.0, TEAL);
@@ -924,10 +1101,17 @@ impl App {
         }
         ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
             ui.label(
-                RichText::new(t("Freie Software · Version 0.1"))
+                RichText::new(tf!("Freie Software · Version {}", env!("CARGO_PKG_VERSION")))
                     .size(11.0)
                     .color(Color32::from_rgb(0x7f, 0x95, 0xab)),
             );
+            if let Some((version, url)) = self.update.clone()
+                && ui
+                    .link(RichText::new(tf!("Neue Version {} herunterladen", version)).size(11.5).color(TEAL))
+                    .clicked()
+            {
+                export::open_url(&url);
+            }
             ui.label(RichText::new(&self.data.company.name).size(12.5).color(NAV_TEXT));
         });
     }
@@ -942,7 +1126,7 @@ impl App {
                 }
                 let (text, color) = match &self.backend {
                     Backend::Remote(r) if r.online => (
-                        format!("● {} · {} ({})", r.server_name, r.user, r.role.label()),
+                        format!("● {} · {} ({})", r.tenant_name, r.user, r.role.label()),
                         GREEN,
                     ),
                     Backend::Remote(r) => (tf!("● {} nicht erreichbar", r.server_name), RED),
@@ -955,6 +1139,7 @@ impl App {
                 ui.label(RichText::new(text).color(color).size(13.0));
                 ui.add_space(12.0);
                 if (self.section != Section::Belege || self.doc_edit.is_none())
+                    && self.backend.allows(OpArea::Sales)
                     && primary(ui, t("+ Rechnung")).clicked()
                 {
                     self.doc_edit = Some(self.new_doc(DocKind::Rechnung));
@@ -1049,8 +1234,14 @@ impl App {
         if self.booking_edit.is_some() {
             self.booking_dialog(&ctx);
         }
+        self.books_dialogs(&ctx);
+        self.stock_dialogs(&ctx);
+        self.bank_dialogs(&ctx);
         if self.mail_draft.is_some() {
             self.mail_dialog(&ctx);
+        }
+        if self.recurring_edit.is_some() {
+            self.recurring_dialog(&ctx);
         }
     }
 }
@@ -1087,6 +1278,20 @@ impl App {
             )));
             ui.add_space(10.0);
 
+            let due = self.data.due_recurring(self.today);
+            if due > 0 && self.backend.allows(OpArea::Sales) {
+                card(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.horizontal(|ui| {
+                        icon(ui, Icon::Repeat, 18.0, ORANGE);
+                        ui.label(RichText::new(tf!("{} wiederkehrende Rechnung(en) sind fällig.", due)).strong());
+                        if primary(ui, t("Jetzt erstellen")).clicked() && self.run(Op::CreateDueRecurring(self.today)).is_ok() {
+                            self.info(t("Die Rechnungen wurden erstellt. Sie finden sie unter Angebote & Rechnungen."));
+                        }
+                    });
+                });
+                ui.add_space(14.0);
+            }
             if self.data.documents.is_empty() && self.data.bookings.is_empty() {
                 card(ui, |ui| {
                     ui.set_width(ui.available_width());

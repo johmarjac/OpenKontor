@@ -15,12 +15,35 @@ const DOC_COLS: [Col; 7] = [
 impl App {
     pub(super) fn documents(&mut self, ui: &mut Ui) {
         let small = self.data.company.small_business;
+        ui.horizontal_wrapped(|ui| {
+            if ui.selectable_label(!self.doc_view_recurring && self.doc_kind.is_none(), t("Alle")).clicked() {
+                self.doc_kind = None;
+                self.doc_view_recurring = false;
+            }
+            for (k, label) in [
+                (DocKind::Angebot, t("Angebote")),
+                (DocKind::Auftragsbestaetigung, t("Aufträge")),
+                (DocKind::Lieferschein, t("Lieferscheine")),
+                (DocKind::Rechnung, t("Rechnungen")),
+                (DocKind::Gutschrift, t("Gutschriften")),
+                (DocKind::Bestellung, t("Bestellungen")),
+            ] {
+                if ui.selectable_label(!self.doc_view_recurring && self.doc_kind == Some(k), label).clicked() {
+                    self.doc_kind = Some(k);
+                    self.doc_view_recurring = false;
+                }
+            }
+            let due = self.data.due_recurring(self.today);
+            let label = if due > 0 { tf!("Wiederkehrend ({} fällig)", due) } else { t("Wiederkehrend").to_string() };
+            if ui.selectable_label(self.doc_view_recurring, label).clicked() {
+                self.doc_view_recurring = true;
+            }
+        });
+        if self.doc_view_recurring {
+            self.recurring_list(ui);
+            return;
+        }
         ui.horizontal(|ui| {
-            ui.selectable_value(&mut self.doc_kind, None, t("Alle"));
-            ui.selectable_value(&mut self.doc_kind, Some(DocKind::Angebot), t("Angebote"));
-            ui.selectable_value(&mut self.doc_kind, Some(DocKind::Rechnung), t("Rechnungen"));
-            ui.selectable_value(&mut self.doc_kind, Some(DocKind::Gutschrift), t("Gutschriften"));
-            ui.separator();
             egui::ComboBox::from_id_salt("doc_status")
                 .selected_text(self.doc_status.map(|s| s.label()).unwrap_or(t("Jeder Status")))
                 .show_ui(ui, |ui| {
@@ -42,6 +65,13 @@ impl App {
                     .desired_width(200.0),
             );
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.menu_button(t("+ Weitere …"), |ui| {
+                    for k in [DocKind::Auftragsbestaetigung, DocKind::Lieferschein, DocKind::Gutschrift, DocKind::Bestellung] {
+                        if ui.button(k.label()).clicked() {
+                            self.doc_edit = Some(self.new_doc(k));
+                        }
+                    }
+                });
                 if ui.button(t("+ Angebot")).clicked() {
                     self.doc_edit = Some(self.new_doc(DocKind::Angebot));
                 }
@@ -66,11 +96,7 @@ impl App {
         list.sort_by(|a, b| b.date.cmp(&a.date).then(b.id.cmp(&a.id)));
         let sum: Cents = list
             .iter()
-            .filter(|d| {
-                d.kind != DocKind::Angebot
-                    && d.status != DocStatus::Storniert
-                    && d.status != DocStatus::Entwurf
-            })
+            .filter(|d| d.kind.is_billing() && d.status != DocStatus::Storniert && d.status != DocStatus::Entwurf)
             .map(|d| d.totals(small).gross)
             .sum();
         let count = list.len();
@@ -100,7 +126,11 @@ impl App {
                                 Cell::Muted("–".into())
                             },
                             Cell::Chip(status_label(d, self.today).into()),
-                            Cell::Money(d.totals(small).gross),
+                            if d.kind == DocKind::Lieferschein {
+                                Cell::Muted("–".into())
+                            } else {
+                                Cell::Money(d.totals(small).gross)
+                            },
                         ];
                         if table_row(ui, &DOC_COLS, &cells, false).clicked() {
                             open = Some(d.id);
@@ -159,18 +189,65 @@ impl App {
                     save = true;
                 }
             } else {
+                let sales = self.backend.allows(OpArea::Sales);
+                let has_advances = self
+                    .data
+                    .documents
+                    .iter()
+                    .any(|d| d.source_id == Some(doc.id) && d.part == InvoicePart::Abschlag && !matches!(d.status, DocStatus::Entwurf | DocStatus::Storniert));
                 match (doc.kind, doc.status) {
-                    (DocKind::Angebot, DocStatus::Offen | DocStatus::Angenommen) => {
-                        if primary(ui, t("In Rechnung umwandeln")).clicked() {
-                            action = Some(Op::ConvertOffer(doc.id));
+                    (DocKind::Angebot | DocKind::Auftragsbestaetigung, DocStatus::Offen | DocStatus::Angenommen) if sales => {
+                        if has_advances {
+                            if primary(ui, t("Schlussrechnung")).on_hover_text(t("Rechnet alles ab und zieht die Abschlagsrechnungen ab.")).clicked() {
+                                action = Some(Op::CreateFinalInvoice(doc.id));
+                            }
+                        } else if primary(ui, t("In Rechnung umwandeln")).clicked() {
+                            action = Some(Op::ConvertDocument(doc.id, DocKind::Rechnung));
                         }
-                        if doc.status == DocStatus::Offen {
+                        if doc.kind == DocKind::Angebot && ui.button(t("Auftragsbestätigung")).clicked() {
+                            action = Some(Op::ConvertDocument(doc.id, DocKind::Auftragsbestaetigung));
+                        }
+                        if ui.button(t("Lieferschein")).clicked() {
+                            action = Some(Op::ConvertDocument(doc.id, DocKind::Lieferschein));
+                        }
+                        ui.menu_button(t("Abschlagsrechnung …"), |ui| {
+                            ui.horizontal(|ui| {
+                                ui.add(egui::DragValue::new(&mut self.advance_pct).range(1.0..=100.0).speed(1.0).suffix(" %"));
+                                if ui.button(t("erstellen")).clicked() {
+                                    action = Some(Op::CreateAdvanceInvoice(doc.id, self.advance_pct));
+                                    ui.close();
+                                }
+                            });
+                            ui.label(muted(t("Anteil des Auftrags, der jetzt berechnet wird")));
+                        });
+                        if doc.kind == DocKind::Angebot && doc.status == DocStatus::Offen {
                             if ui.button(t("Angenommen")).clicked() {
                                 action = Some(Op::SetDocStatus(doc.id, DocStatus::Angenommen));
                             }
                             if ui.button(t("Abgelehnt")).clicked() {
                                 action = Some(Op::SetDocStatus(doc.id, DocStatus::Abgelehnt));
                             }
+                        }
+                    }
+                    (DocKind::Lieferschein, DocStatus::Offen) if sales => {
+                        if primary(ui, t("In Rechnung umwandeln")).clicked() {
+                            action = Some(Op::ConvertDocument(doc.id, DocKind::Rechnung));
+                        }
+                        if ui.button(t("Als geliefert markieren")).clicked() {
+                            action = Some(Op::SetDocStatus(doc.id, DocStatus::Erledigt));
+                        }
+                    }
+                    (DocKind::Lieferschein, DocStatus::Erledigt) if sales => {
+                        if primary(ui, t("In Rechnung umwandeln")).clicked() {
+                            action = Some(Op::ConvertDocument(doc.id, DocKind::Rechnung));
+                        }
+                    }
+                    (DocKind::Bestellung, DocStatus::Offen) if sales => {
+                        if primary(ui, t("Ware erhalten"))
+                            .on_hover_text(t("Bucht die bestellten Artikel ins Lager ein."))
+                            .clicked()
+                        {
+                            action = Some(Op::ReceivePurchase(doc.id));
                         }
                     }
                     (_, DocStatus::Bezahlt) => {
@@ -220,6 +297,14 @@ impl App {
                     if ui.button(t("Kopie als neuer Entwurf")).clicked() {
                         action = Some(Op::DuplicateDocument(doc.id));
                     }
+                    if doc.kind == DocKind::Rechnung && ui.button(t("Als wiederkehrende Rechnung einrichten …")).clicked() {
+                        self.recurring_edit = Some(Recurring {
+                            name: format!("{} – {}", self.data.contact_name(doc.contact_id), doc.title),
+                            template: doc.clone(),
+                            next_date: doc.date.checked_add_months(chrono::Months::new(1)).unwrap_or(doc.date),
+                            ..Recurring::default()
+                        });
+                    }
                     if doc.kind == DocKind::Rechnung && doc.status != DocStatus::Storniert {
                         if ui.button(t("Gutschrift / Storno erstellen")).clicked() {
                             action = Some(Op::CreateCredit(doc.id));
@@ -236,13 +321,21 @@ impl App {
         });
 
         // Recording a payment for an open invoice or credit note.
-        if matches!(doc.kind, DocKind::Rechnung | DocKind::Gutschrift) && doc.status == DocStatus::Offen {
+        if doc.kind.is_billing() && doc.status == DocStatus::Offen && self.backend.allows(OpArea::Accounting) {
             ui.add_space(6.0);
-            ui.horizontal(|ui| {
+            let small = self.data.company.small_business;
+            let open = doc.open_amount(small);
+            ui.horizontal_wrapped(|ui| {
                 ui.label(muted(t("Zahlung am")));
                 if date_edit(ui, Id::unique("paid_date"), &mut self.doc_paid_date) {
                     self.doc_paid_discount = doc.discount_on(self.doc_paid_date);
                 }
+                ui.label(muted(t("Betrag")));
+                money_edit(ui, Id::unique("pay_amount"), &mut self.doc_pay_amount, 90.0);
+                egui::ComboBox::from_id_salt("pay_method").width(80.0).selected_text(t(if self.doc_pay_method == CASH { "Kasse" } else { "Bank" })).show_ui(ui, |ui| {
+                    ui.selectable_value(&mut self.doc_pay_method, "Bank".to_string(), t("Bank"));
+                    ui.selectable_value(&mut self.doc_pay_method, CASH.to_string(), t("Kasse"));
+                });
                 if !doc.discounts.is_empty() {
                     let allowed = doc.discount_on(self.doc_paid_date);
                     egui::ComboBox::from_id_salt("paid_discount")
@@ -261,14 +354,31 @@ impl App {
                             }
                         });
                 }
-                if primary(ui, t("Als bezahlt buchen")).clicked() {
-                    action = Some(if self.doc_paid_discount > 0.0 {
+                let part = self.doc_pay_amount > 0 && self.doc_pay_amount < open.abs() && self.doc_paid_discount == 0.0;
+                if primary(ui, if part { t("Teilzahlung buchen") } else { t("Als bezahlt buchen") }).clicked() {
+                    let sign = if open < 0 { -1 } else { 1 };
+                    action = Some(if part || self.doc_pay_method != "Bank" {
+                        let discount = if part {
+                            0
+                        } else {
+                            let gross = doc.totals(small).gross;
+                            ((gross as f64 * self.doc_paid_discount / 100.0).round() as Cents).clamp(-open.abs(), open.abs())
+                        };
+                        let amount = if part { sign * self.doc_pay_amount } else { open - discount };
+                        Op::AddPayment(
+                            doc.id,
+                            Payment { date: self.doc_paid_date, amount, discount, method: self.doc_pay_method.clone(), bank_tx: None },
+                        )
+                    } else if self.doc_paid_discount > 0.0 {
                         Op::MarkPaidWithDiscount(doc.id, self.doc_paid_date, self.doc_paid_discount)
                     } else {
                         Op::MarkPaid(doc.id, self.doc_paid_date)
                     });
                 }
             });
+            if !doc.payments.is_empty() {
+                ui.label(muted(tf!("Bereits bezahlt {} · noch offen {}", fmt_money(doc.paid_total().abs()), fmt_money(open.abs()))));
+            }
         }
         ui.add_space(10.0);
 
@@ -321,7 +431,12 @@ impl App {
         if let Some(op) = action {
             let opens_new = matches!(
                 op,
-                Op::ConvertOffer(_) | Op::CreateCredit(_) | Op::DuplicateDocument(_)
+                Op::ConvertOffer(_)
+                    | Op::CreateCredit(_)
+                    | Op::DuplicateDocument(_)
+                    | Op::ConvertDocument(..)
+                    | Op::CreateAdvanceInvoice(..)
+                    | Op::CreateFinalInvoice(_)
             );
             if let Ok(id) = self.run(op) {
                 let target = if opens_new { id.unwrap_or(doc.id) } else { doc.id };
@@ -331,6 +446,7 @@ impl App {
                 if let Some(d) = self.data.documents.iter().find(|d| d.id == target) {
                     doc = d.clone();
                 }
+                self.doc_pay_amount = doc.open_amount(self.data.company.small_business).abs();
             }
         }
         if let Some(id) = switch_to
@@ -368,7 +484,8 @@ impl App {
                     .show(ui, |ui| {
                         ui.label(muted(t("Kontakt")));
                         let mut contacts: Vec<&Contact> = self.data.contacts.iter().collect();
-                        contacts.sort_by_key(|c| (c.kind != ContactKind::Kunde, c.display_name().to_lowercase()));
+                        let want = if doc.kind == DocKind::Bestellung { ContactKind::Lieferant } else { ContactKind::Kunde };
+                        contacts.sort_by_key(|c| (c.kind != want, c.display_name().to_lowercase()));
                         let before = doc.contact_id;
                         egui::ComboBox::from_id_salt("doc_contact")
                             .width(250.0)
@@ -394,6 +511,11 @@ impl App {
                         if doc.contact_id != before && doc.kind == DocKind::Rechnung {
                             doc.apply_term(&self.data.term_for(doc.contact_id));
                         }
+                        if doc.contact_id != before
+                            && let Some(c) = self.data.contact(doc.contact_id)
+                        {
+                            doc.vat_case = c.vat_case;
+                        }
                         ui.label(muted(t("Datum")));
                         date_edit(ui, Id::unique("doc_date"), &mut doc.date);
                         ui.end_row();
@@ -412,9 +534,30 @@ impl App {
                                 .hint_text(t("z. B. Oktober 2026"))
                                 .desired_width(250.0),
                         );
-                        ui.label(muted(if doc.kind == DocKind::Angebot { t("Gültig bis") } else { t("Fällig am") }));
-                        ui.label(fmt_date(doc.due_date()));
+                        match doc.kind {
+                            DocKind::Angebot => {
+                                ui.label(muted(t("Gültig bis")));
+                                ui.label(fmt_date(doc.due_date()));
+                            }
+                            DocKind::Rechnung => {
+                                ui.label(muted(t("Fällig am")));
+                                ui.label(fmt_date(doc.due_date()));
+                            }
+                            _ => {
+                                ui.label("");
+                                ui.label("");
+                            }
+                        }
                         ui.end_row();
+                        if !small && doc.kind != DocKind::Lieferschein {
+                            ui.label(muted(t("Umsatzsteuer")));
+                            egui::ComboBox::from_id_salt("doc_vat_case").width(250.0).selected_text(doc.vat_case.label()).show_ui(ui, |ui| {
+                                for v in VatCase::ALL {
+                                    ui.selectable_value(&mut doc.vat_case, v, v.label());
+                                }
+                            });
+                            ui.end_row();
+                        }
                     });
                 if doc.kind == DocKind::Rechnung && editable {
                     ui.add_space(6.0);
@@ -609,6 +752,18 @@ impl App {
                     .clicked()
             {
                 switch_to = Some(src.id);
+            }
+            if doc.payments.len() > 1 || (doc.status == DocStatus::Offen && !doc.payments.is_empty()) {
+                ui.label(RichText::new(t("Zahlungen")).strong());
+                for p in &doc.payments {
+                    ui.label(muted(tf!("{}: {} per {}", fmt_date(p.date), fmt_money(p.amount.abs()), t(if p.method == CASH { "Kasse" } else { "Bank" }))));
+                }
+            }
+            if doc.part != InvoicePart::Normal {
+                ui.label(muted(match doc.part {
+                    InvoicePart::Abschlag => t("Abschlagsrechnung – wird in der Schlussrechnung abgezogen."),
+                    _ => t("Schlussrechnung – die Abschläge sind abgezogen."),
+                }));
             }
             if doc.status == DocStatus::Bezahlt
                 && let Some(p) = doc.paid_date

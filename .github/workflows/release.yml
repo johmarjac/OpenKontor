@@ -144,12 +144,40 @@ jobs:
               ;;
           esac
 
+      # Installer for Windows (Inno Setup), disk image for macOS, Debian package for Linux.
+      - name: Installationspaket
+        shell: bash
+        run: |
+          set -e
+          case "${{ matrix.target }}" in
+            *windows*)
+              ARCH=$([ "${{ matrix.target }}" = "aarch64-pc-windows-msvc" ] && echo arm64 || echo x64)
+              ISCC="/c/Program Files (x86)/Inno Setup 6/ISCC.exe"
+              if [ ! -f "$ISCC" ]; then choco install innosetup -y --no-progress; fi
+              "$ISCC" "//DVersion=$VERSION" "//DArch=$ARCH" "//DSource=$(cygpath -w "$PWD/dist/$PKG")" "//O$(cygpath -w "$PWD/dist")" deploy/windows/openkontor.iss
+              ;;
+            universal)
+              mkdir -p dmgroot
+              cp -R "dist/$PKG/OpenKontor.app" dmgroot/
+              ln -s /Applications dmgroot/Programme
+              hdiutil create -volname "OpenKontor" -srcfolder dmgroot -ov -format UDZO "dist/OpenKontor-$VERSION-macos-universal.dmg"
+              ;;
+            *linux*)
+              cargo install --locked cargo-deb
+              cargo deb --no-build --no-strip --target ${{ matrix.target }} --deb-version "$VERSION" -o dist/
+              ;;
+          esac
+          ls -la dist
+
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.name }}
           path: |
             dist/*.zip
             dist/*.tar.gz
+            dist/*.exe
+            dist/*.dmg
+            dist/*.deb
             server/openkontor-server
           if-no-files-found: error
 
@@ -169,7 +197,7 @@ jobs:
       - name: Dateien und Prüfsummen
         run: |
           mkdir -p upload
-          find artifacts \( -name '*.zip' -o -name '*.tar.gz' \) -exec cp {} upload/ \;
+          find artifacts \( -name '*.zip' -o -name '*.tar.gz' -o -name '*.exe' -o -name '*.dmg' -o -name '*.deb' \) -exec cp {} upload/ \;
           (cd upload && sha256sum * > SHA256SUMS.txt)
           ls -la upload
           sed "s/{VERSION}/$VERSION/g" .github/release-notes.md > notes.md

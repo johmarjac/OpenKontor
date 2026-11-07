@@ -1,0 +1,22 @@
+#!/bin/sh
+# After installing the package: a system user and a data folder for the server.
+# The server is not started automatically; see /usr/share/doc/openkontor/SERVER-INSTALLATION.md.
+set -e
+if [ "$1" = "configure" ]; then
+    if ! getent passwd openkontor >/dev/null; then
+        adduser --system --group --home /var/lib/openkontor --no-create-home openkontor >/dev/null
+    fi
+    mkdir -p /var/lib/openkontor /etc/openkontor
+    chown openkontor:openkontor /var/lib/openkontor
+    chmod 750 /var/lib/openkontor
+    if [ ! -f /etc/openkontor/server.env ]; then
+        printf 'OPENKONTOR_PORT=8470\n' > /etc/openkontor/server.env
+        chmod 640 /etc/openkontor/server.env
+        chown root:openkontor /etc/openkontor/server.env
+    fi
+    if command -v systemctl >/dev/null; then
+        systemctl daemon-reload || true
+    fi
+    echo "OpenKontor installiert. Server starten: sudo systemctl enable --now openkontor-server"
+fi
+exit 0

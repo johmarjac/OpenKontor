@@ -66,12 +66,12 @@ pub fn lang() -> Lang {
 
 fn table() -> &'static HashMap<&'static str, &'static str> {
     static MAP: OnceLock<HashMap<&'static str, &'static str>> = OnceLock::new();
-    MAP.get_or_init(|| TEXTS.iter().copied().collect())
+    MAP.get_or_init(|| TEXTS.iter().chain(TEXTS_MORE).copied().collect())
 }
 
 fn reverse_table() -> &'static HashMap<&'static str, &'static str> {
     static MAP: OnceLock<HashMap<&'static str, &'static str>> = OnceLock::new();
-    MAP.get_or_init(|| TEXTS.iter().map(|(de, en)| (*en, *de)).collect())
+    MAP.get_or_init(|| TEXTS.iter().chain(TEXTS_MORE).map(|(de, en)| (*en, *de)).collect())
 }
 
 fn lookup(lang: Lang, de: &str) -> Option<&'static str> {
@@ -124,6 +124,9 @@ macro_rules! tf {
         $crate::i18n::fill($crate::i18n::t($template), &[$(&$arg as &dyn std::fmt::Display),*])
     };
 }
+
+// Texts of bank, cash book, assets, stock, reports and server functions.
+include!("i18n_more.rs");
 
 /// German → English.
 const TEXTS: &[(&str, &str)] = &[
@@ -867,6 +870,13 @@ mod tests {
             include_str!("app/settings.rs"),
             include_str!("app/mailing.rs"),
             include_str!("app/receipts.rs"),
+            include_str!("app/bank.rs"),
+            include_str!("app/books.rs"),
+            include_str!("app/stock.rs"),
+            include_str!("app/recurring.rs"),
+            include_str!("app/statements.rs"),
+            include_str!("app/settings_more.rs"),
+            include_str!("server.rs"),
             include_str!("ui_kit.rs"),
             include_str!("pdf.rs"),
         ];
@@ -889,7 +899,7 @@ mod tests {
     #[test]
     fn no_duplicate_keys() {
         let mut seen = std::collections::HashSet::new();
-        for (de, _) in TEXTS {
+        for (de, _) in TEXTS.iter().chain(TEXTS_MORE) {
             assert!(seen.insert(de), "doppelt: {de}");
         }
     }

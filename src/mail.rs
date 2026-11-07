@@ -49,6 +49,8 @@ pub struct MailSettings {
     pub reply_to: String,
     /// Copy of every e-mail to this address (e.g. for the archive).
     pub bcc: String,
+    /// Microsoft 365: send as an app (SMTP.SendAsApp) instead of with the password.
+    pub microsoft: crate::oauth_mail::OAuthApp,
 }
 
 impl MailSettings {
@@ -109,6 +111,30 @@ pub fn default_template(kind: MailKind, lang: Lang) -> (String, String) {
         (Lang::De, MailKind::Mahnung(_)) => (
             "Letzte Mahnung zu Rechnung {nummer}",
             "{anrede}\n\ntrotz mehrfacher Erinnerung ist unsere Rechnung {nummer} vom {datum} noch immer nicht bezahlt.\n\nSollte der offene Betrag von {gesamt} nicht bis zum {neue_frist} bei uns eingehen, werden wir die Forderung ohne weitere Ankündigung gerichtlich geltend machen oder an ein Inkassounternehmen übergeben.\n\nMit freundlichen Grüßen\n{absender}\n{firma}",
+        ),
+        (Lang::De, MailKind::Auftragsbestaetigung) => (
+            "Auftragsbestätigung {nummer} – {firma}",
+            "{anrede}\n\nvielen Dank für Ihren Auftrag. Anbei erhalten Sie unsere Auftragsbestätigung {nummer} vom {datum} über {betrag}.\n\nMit freundlichen Grüßen\n{absender}\n{firma}",
+        ),
+        (Lang::De, MailKind::Lieferschein) => (
+            "Lieferschein {nummer} – {firma}",
+            "{anrede}\n\nanbei erhalten Sie den Lieferschein {nummer} vom {datum} zu Ihrer Lieferung.\n\nMit freundlichen Grüßen\n{absender}\n{firma}",
+        ),
+        (Lang::De, MailKind::Bestellung) => (
+            "Bestellung {nummer} – {firma}",
+            "{anrede}\n\nhiermit bestellen wir gemäß beiliegender Bestellung {nummer} vom {datum}. Bitte bestätigen Sie uns den Liefertermin.\n\nMit freundlichen Grüßen\n{absender}\n{firma}",
+        ),
+        (Lang::En, MailKind::Auftragsbestaetigung) => (
+            "Order confirmation {nummer} – {firma}",
+            "{anrede}\n\nthank you for your order. Please find attached our order confirmation {nummer} dated {datum} for {betrag}.\n\nKind regards\n{absender}\n{firma}",
+        ),
+        (Lang::En, MailKind::Lieferschein) => (
+            "Delivery note {nummer} – {firma}",
+            "{anrede}\n\nplease find attached delivery note {nummer} dated {datum} for your delivery.\n\nKind regards\n{absender}\n{firma}",
+        ),
+        (Lang::En, MailKind::Bestellung) => (
+            "Purchase order {nummer} – {firma}",
+            "{anrede}\n\nwe hereby place the attached purchase order {nummer} dated {datum}. Please confirm the delivery date.\n\nKind regards\n{absender}\n{firma}",
         ),
         (Lang::En, MailKind::Angebot) => (
             "Quote {nummer} – {firma}",
@@ -278,7 +304,12 @@ pub fn send(
     let mut transport = transport
         .port(if settings.port == 0 { default_port } else { settings.port })
         .timeout(Some(Duration::from_secs(30)));
-    if !settings.username.trim().is_empty() {
+    if settings.microsoft.is_set() {
+        let token = crate::oauth_mail::token(&settings.microsoft)?;
+        transport = transport
+            .credentials(Credentials::new(settings.username.trim().to_string(), token))
+            .authentication(vec![lettre::transport::smtp::authentication::Mechanism::Xoauth2]);
+    } else if !settings.username.trim().is_empty() {
         transport = transport.credentials(Credentials::new(settings.username.trim().to_string(), settings.password.clone()));
     }
     transport

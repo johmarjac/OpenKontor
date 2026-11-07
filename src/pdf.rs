@@ -113,6 +113,8 @@ enum Align {
 #[derive(Default)]
 struct Page {
     ops: Vec<u8>,
+    /// The company logo, if this page shows it.
+    logo: Option<Logo>,
 }
 
 impl Page {
@@ -144,6 +146,12 @@ impl Page {
             )
             .as_bytes(),
         );
+    }
+
+    /// Draws the logo (image /Im1) into a box with its lower left corner at x, y.
+    fn image(&mut self, logo: &Logo, x: f32, y: f32, w: f32, h: f32) {
+        self.logo = Some(logo.clone());
+        self.ops.extend_from_slice(format!("q {w:.2} 0 0 {h:.2} {x:.2} {y:.2} cm /Im1 Do Q\n").as_bytes());
     }
 
     fn rect(&mut self, x: f32, y: f32, w: f32, h: f32, color: Rgb) {
@@ -319,13 +327,17 @@ fn write_pdf_with(pages: &[Page], title: &str, author: &str, attach: Option<Atta
         info
     };
     obj(&mut out, &mut offsets, &info);
+    // The logo is one image object after all others, shared by the pages.
+    let logo = pages.iter().find_map(|p| p.logo.clone());
+    let image_obj = if pdfa { extra + 8 } else { extra };
     for (i, page) in pages.iter().enumerate() {
+        let xobject = if page.logo.is_some() { format!(" /XObject << /Im1 {image_obj} 0 R >>") } else { String::new() };
         obj(
             &mut out,
             &mut offsets,
             format!(
                 "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {PAGE_W} {PAGE_H}] \
-                 /Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> /Contents {} 0 R >>",
+                 /Resources << /Font << /F1 3 0 R /F2 4 0 R >>{xobject} >> /Contents {} 0 R >>",
                 content_obj(i)
             )
             .as_bytes(),
@@ -414,6 +426,20 @@ fn write_pdf_with(pages: &[Page], title: &str, author: &str, attach: Option<Atta
             .as_bytes(),
         );
         id_source.extend_from_slice(a.xml);
+    }
+    if let Some(l) = &logo {
+        let pixels = decode_base64(&l.rgb);
+        obj(
+            &mut out,
+            &mut offsets,
+            &stream(
+                &format!(
+                    "/Type /XObject /Subtype /Image /Width {} /Height {} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /FlateDecode",
+                    l.width, l.height
+                ),
+                &pixels,
+            ),
+        );
     }
     id_source.extend_from_slice(title.as_bytes());
     id_source.extend_from_slice(pdf_date.as_bytes());
@@ -522,6 +548,20 @@ fn letterhead(p: &mut Page, c: &Company, contact: Option<&Contact>, meta: &[(Str
     let y = PAGE_H - 22.0 * MM;
     p.text(LEFT, y, 18.0, true, ACCENT, Align::Left, &c.name);
     p.rect(LEFT, y - 9.0, RIGHT - LEFT, 2.0, ACCENT);
+    // The logo sits top right above the line, at most 18 mm high and 60 mm wide.
+    if let Some(logo) = &c.logo
+        && logo.width > 0
+        && logo.height > 0
+    {
+        let ratio = logo.width as f32 / logo.height as f32;
+        let mut h = 18.0 * MM;
+        let mut w = h * ratio;
+        if w > 60.0 * MM {
+            w = 60.0 * MM;
+            h = w / ratio;
+        }
+        p.image(logo, RIGHT - w, y - 4.0, w, h);
+    }
 
     let mut my = PAGE_H - 50.0 * MM;
     for (label, value) in meta {
@@ -700,13 +740,22 @@ fn document_pages(data: &Data, doc: &Document) -> (Vec<Page>, String, String) {
     match doc.kind {
         DocKind::Rechnung => meta.push((l("Fällig am").into(), date(doc.due_date()))),
         DocKind::Angebot => meta.push((l("Gültig bis").into(), date(doc.due_date()))),
-        DocKind::Gutschrift => {}
+        _ => {}
     }
     if let Some(k) = contact
         && !k.number.is_empty()
+        && doc.kind != DocKind::Bestellung
     {
         meta.push((l("Kunden-Nr.").into(), k.number.clone()));
     }
+    if let Some(src) = doc.source_id.and_then(|id| data.documents.iter().find(|d| d.id == id))
+        && !src.number.is_empty()
+        && matches!(doc.kind, DocKind::Lieferschein | DocKind::Auftragsbestaetigung)
+    {
+        meta.push((crate::i18n::fill(l("{}-Nr."), &[&l(src.kind.name())]), src.number.clone()));
+    }
+    // A delivery note shows quantities only.
+    let quantities_only = doc.kind == DocKind::Lieferschein;
     let my = letterhead(&mut p, c, contact, &meta);
 
     // Title and opening text.
@@ -721,7 +770,21 @@ fn document_pages(data: &Data, doc: &Document) -> (Vec<Page>, String, String) {
     y -= 8.0;
 
     // Item table, continued on further pages when needed.
-    y = table_header(&mut p, y, &col, small, lang);
+    let small = small || quantities_only;
+    let col = if quantities_only { Cols { qty: RIGHT, ..cols(true) } } else { col };
+    let header = |p: &mut Page, y: f32| {
+        if quantities_only {
+            let s = 8.5;
+            p.text(col.pos, y, s, true, TEXT, Align::Left, l("Pos."));
+            p.text(col.text.0, y, s, true, TEXT, Align::Left, l("Bezeichnung"));
+            p.text(RIGHT, y, s, true, TEXT, Align::Right, l("Menge"));
+            p.line(LEFT, y - 5.0, RIGHT, y - 5.0, 0.8, TEXT);
+            y - 18.0
+        } else {
+            table_header(p, y, &col, small, lang)
+        }
+    };
+    y = header(&mut p, y);
     for (i, l) in doc.lines.iter().enumerate() {
         let mut text_lines = wrap(&l.text, 9.5, false, col.text.1 - col.text.0);
         if text_lines.is_empty() {
@@ -736,7 +799,7 @@ fn document_pages(data: &Data, doc: &Document) -> (Vec<Page>, String, String) {
             y = PAGE_H - 25.0 * MM;
             p.text(LEFT, y, 9.0, false, MUTED, Align::Left, &crate::i18n::fill(t_in(lang, "{} {} – Fortsetzung"), &[&kind, &number]));
             y -= 22.0;
-            y = table_header(&mut p, y, &col, small, lang);
+            y = header(&mut p, y);
         }
         p.text(col.pos, y, 9.5, false, TEXT, Align::Left, &(i + 1).to_string());
         for (k, t) in text_lines.iter().enumerate() {
@@ -752,13 +815,32 @@ fn document_pages(data: &Data, doc: &Document) -> (Vec<Page>, String, String) {
             );
         }
         p.text(col.qty, y, 9.5, false, TEXT, Align::Right, &format!("{} {}", fmt_qty_in(lang, l.qty), l.unit));
-        p.text(col.price, y, 9.5, false, TEXT, Align::Right, &money(l.price_net));
-        if !small {
-            p.text(col.vat, y, 9.5, false, TEXT, Align::Right, &format!("{} %", l.vat));
+        if !quantities_only {
+            p.text(col.price, y, 9.5, false, TEXT, Align::Right, &money(l.price_net));
+            if !small {
+                p.text(col.vat, y, 9.5, false, TEXT, Align::Right, &format!("{} %", l.vat));
+            }
+            p.text(col.total, y, 9.5, false, TEXT, Align::Right, &money(sign * l.net()));
         }
-        p.text(col.total, y, 9.5, false, TEXT, Align::Right, &money(sign * l.net()));
         y -= row_h;
         p.line(LEFT, y + 9.0, RIGHT, y + 9.0, 0.4, RULE);
+    }
+
+    if quantities_only {
+        y -= 14.0;
+        for line in wrap(&doc.outro, 10.0, false, RIGHT - LEFT) {
+            p.text(LEFT, y, 10.0, false, TEXT, Align::Left, &line);
+            y -= 13.5;
+        }
+        y -= 30.0;
+        p.line(LEFT, y, LEFT + 180.0, y, 0.6, TEXT);
+        p.text(LEFT, y - 11.0, 8.0, false, MUTED, Align::Left, l("Datum, Unterschrift Empfänger"));
+        pages.push(p);
+        let n = pages.len();
+        for (i, page) in pages.iter_mut().enumerate() {
+            footer(page, c, i + 1, n, lang);
+        }
+        return (pages, format!("{kind} {number}"), c.name.clone());
     }
 
     // Totals; keep them together with the closing text on one page.
@@ -789,9 +871,26 @@ fn document_pages(data: &Data, doc: &Document) -> (Vec<Page>, String, String) {
     p.text(label_x, y, 11.5, true, TEXT, Align::Left, l("Gesamtbetrag"));
     p.text(RIGHT, y, 11.5, true, TEXT, Align::Right, &money(totals.gross));
     y -= 28.0;
-    if small {
+    if c.small_business {
         p.text(LEFT, y, 8.5, false, MUTED, Align::Left, l("Gemäß § 19 UStG wird keine Umsatzsteuer berechnet."));
         y -= 16.0;
+    } else if let Some(note) = doc.vat_case.invoice_note() {
+        p.text(LEFT, y, 8.5, false, TEXT, Align::Left, l(note));
+        y -= 12.0;
+        if let Some(k) = contact.filter(|k| !k.vat_id.is_empty()) {
+            p.text(LEFT, y, 8.5, false, MUTED, Align::Left, &crate::i18n::fill(l("USt-IdNr. des Kunden: {}"), &[&k.vat_id]));
+            y -= 12.0;
+        }
+        y -= 4.0;
+    }
+    let paid = doc.paid_total();
+    if doc.kind.is_billing() && paid != 0 && doc.status == DocStatus::Offen {
+        p.text(label_x, y, 10.0, false, TEXT, Align::Left, l("Bereits bezahlt"));
+        p.text(RIGHT, y, 10.0, false, TEXT, Align::Right, &money(paid));
+        y -= 14.0;
+        p.text(label_x, y, 10.5, true, TEXT, Align::Left, l("Noch offen"));
+        p.text(RIGHT, y, 10.5, true, TEXT, Align::Right, &money(totals.gross - paid));
+        y -= 22.0;
     }
     for line in &pay {
         p.text(LEFT, y, 10.0, false, TEXT, Align::Left, line);
@@ -811,6 +910,125 @@ fn document_pages(data: &Data, doc: &Document) -> (Vec<Page>, String, String) {
         footer(page, c, i + 1, n, lang);
     }
     (pages, format!("{kind} {number}"), c.name.clone())
+}
+
+/// One block of a text report: a heading, paragraphs, or a table of label/amount rows.
+pub enum Block {
+    Heading(String),
+    Paragraph(String),
+    /// Rows of (label, value); a row with an empty label draws a rule.
+    Rows(Vec<(String, String, bool)>),
+}
+
+/// A plain report on the letterhead, e.g. the procedure documentation or a balance sheet.
+pub fn report_pdf(data: &Data, title: &str, subtitle: &str, blocks: &[Block]) -> Vec<u8> {
+    let c = &data.company;
+    let mut pages = Vec::new();
+    let mut p = Page::default();
+    let mut y = PAGE_H - 22.0 * MM;
+    p.text(LEFT, y, 14.0, true, ACCENT, Align::Left, &c.name);
+    p.rect(LEFT, y - 7.0, RIGHT - LEFT, 1.5, ACCENT);
+    y -= 34.0;
+    p.text(LEFT, y, 16.0, true, TEXT, Align::Left, title);
+    y -= 16.0;
+    p.text(LEFT, y, 9.5, false, MUTED, Align::Left, subtitle);
+    y -= 22.0;
+    let mut new_page = |p: &mut Page, y: &mut f32| {
+        if *y < BOTTOM {
+            pages.push(std::mem::take(p));
+            *y = PAGE_H - 25.0 * MM;
+        }
+    };
+    for b in blocks {
+        match b {
+            Block::Heading(h) => {
+                if y - 40.0 < BOTTOM {
+                    y = BOTTOM - 1.0;
+                    new_page(&mut p, &mut y);
+                }
+                y -= 6.0;
+                p.text(LEFT, y, 11.5, true, ACCENT, Align::Left, h);
+                y -= 16.0;
+            }
+            Block::Paragraph(text) => {
+                for para in text.split('\n') {
+                    for line in wrap(para, 9.5, false, RIGHT - LEFT) {
+                        new_page(&mut p, &mut y);
+                        p.text(LEFT, y, 9.5, false, TEXT, Align::Left, &line);
+                        y -= 12.5;
+                    }
+                }
+                y -= 6.0;
+            }
+            Block::Rows(rows) => {
+                for (label, value, bold) in rows {
+                    new_page(&mut p, &mut y);
+                    if label.is_empty() && value.is_empty() {
+                        p.line(LEFT, y + 8.0, RIGHT, y + 8.0, 0.5, RULE);
+                        y -= 4.0;
+                        continue;
+                    }
+                    for (k, line) in wrap(label, 9.5, *bold, RIGHT - LEFT - 120.0).iter().enumerate() {
+                        p.text(LEFT, y - k as f32 * 12.0, 9.5, *bold, TEXT, Align::Left, line);
+                    }
+                    p.text(RIGHT, y, 9.5, *bold, TEXT, Align::Right, value);
+                    y -= 14.0;
+                }
+                y -= 6.0;
+            }
+        }
+    }
+    pages.push(p);
+    let n = pages.len();
+    for (i, page) in pages.iter_mut().enumerate() {
+        footer(page, c, i + 1, n, Lang::De);
+    }
+    write_pdf(&pages, title, &c.name)
+}
+
+/// Decodes standard base64 (used for the stored logo).
+pub fn decode_base64(s: &str) -> Vec<u8> {
+    let val = |c: u8| match c {
+        b'A'..=b'Z' => Some(c - b'A'),
+        b'a'..=b'z' => Some(c - b'a' + 26),
+        b'0'..=b'9' => Some(c - b'0' + 52),
+        b'+' => Some(62),
+        b'/' => Some(63),
+        _ => None,
+    };
+    let mut out = Vec::with_capacity(s.len() * 3 / 4);
+    let (mut buf, mut bits) = (0u32, 0);
+    for v in s.bytes().filter_map(val) {
+        buf = (buf << 6) | v as u32;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((buf >> bits) as u8);
+        }
+    }
+    out
+}
+
+pub fn encode_base64(bytes: &[u8]) -> String {
+    const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
+        let n = (b[0] as u32) << 16 | (b[1] as u32) << 8 | b[2] as u32;
+        for k in 0..4 {
+            if k <= chunk.len() {
+                out.push(A[(n >> (18 - 6 * k) & 63) as usize] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
+/// Turns RGB pixels into a logo for the letterhead.
+pub fn make_logo(width: u32, height: u32, rgb: &[u8]) -> Logo {
+    Logo { width, height, rgb: encode_base64(&deflate(rgb)) }
 }
 
 /// A file name like "Rechnung RE-2026-0012.pdf".
@@ -864,6 +1082,16 @@ mod tests {
         let en_pdf = document_pdf(&english, offer);
         let en_text = String::from_utf8_lossy(&en_pdf);
         assert!(en_text.contains("(Total amount)") && en_text.contains("(Quote no.)"));
+        // With a logo the image is embedded once.
+        let mut with_logo = data.clone();
+        with_logo.company.logo = Some(make_logo(2, 1, &[255, 0, 0, 0, 0, 255]));
+        let logo_pdf = String::from_utf8_lossy(&document_pdf(&with_logo, offer)).into_owned();
+        assert!(logo_pdf.contains("/Subtype /Image /Width 2 /Height 1") && logo_pdf.contains("/Im1 Do"));
+        assert_eq!(decode_base64(&encode_base64(b"Hallo Welt")), b"Hallo Welt");
+        // A delivery note has no prices.
+        let mut ls = offer.clone();
+        ls.kind = DocKind::Lieferschein;
+        assert!(!String::from_utf8_lossy(&document_pdf(&data, &ls)).contains("(Gesamtbetrag)"));
         if let Ok(dir) = std::env::var("OPENKONTOR_PDF_OUT") {
             std::fs::write(format!("{dir}/angebot-en.pdf"), &en_pdf).unwrap();
             std::fs::write(format!("{dir}/angebot.pdf"), &bytes).unwrap();

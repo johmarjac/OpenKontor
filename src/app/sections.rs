@@ -134,6 +134,22 @@ impl App {
                     text_row(ui, t("E-Mail"), &mut c.email, 380.0);
                     text_row(ui, t("Telefon"), &mut c.phone, 380.0);
                     text_row(ui, t("USt-IdNr."), &mut c.vat_id, 380.0);
+                    text_row(ui, t("IBAN"), &mut c.iban, 380.0);
+                    ui.label(muted(t("Umsatzsteuer")));
+                    egui::ComboBox::from_id_salt("contact_vat_case")
+                        .width(300.0)
+                        .selected_text(c.vat_case.label())
+                        .show_ui(ui, |ui| {
+                            for v in VatCase::ALL {
+                                ui.selectable_value(&mut c.vat_case, v, v.label());
+                            }
+                        });
+                    ui.end_row();
+                    if matches!(c.vat_case, VatCase::IgLieferung | VatCase::ReverseCharge) && c.vat_id.trim().is_empty() {
+                        ui.label("");
+                        ui.label(RichText::new(t("Für EU-Geschäfte ohne Umsatzsteuer ist die USt-IdNr. des Kunden Pflicht.")).color(ORANGE));
+                        ui.end_row();
+                    }
                     ui.label(muted(t("Zahlungsbedingung")));
                     term_combo(
                         ui,
@@ -271,6 +287,15 @@ fn gross_of(net: Cents, vat: u8) -> Cents {
 impl App {
     pub(super) fn articles(&mut self, ui: &mut Ui) {
         ui.horizontal(|ui| {
+            ui.selectable_value(&mut self.stock.tab, stock::StockTab::Artikel, t("Artikel & Leistungen"));
+            ui.selectable_value(&mut self.stock.tab, stock::StockTab::Lager, t("Lagerbestand"));
+        });
+        ui.add_space(6.0);
+        if self.stock.tab == stock::StockTab::Lager {
+            self.stock_page(ui);
+            return;
+        }
+        ui.horizontal(|ui| {
             ui.add(
                 TextEdit::singleline(&mut self.article_search)
                     .hint_text(t("Suchen …"))
@@ -371,6 +396,27 @@ impl App {
                     ui.label(muted(t("Preis brutto")));
                     ui.label(fmt_money(gross_of(a.price_net, a.vat)));
                     ui.end_row();
+                    if !a.service {
+                        ui.label(muted(t("Einkaufspreis netto")));
+                        ui.horizontal(|ui| {
+                            money_edit(ui, Id::unique("art_purchase"), &mut a.purchase_price, 110.0);
+                            ui.label("€");
+                        });
+                        ui.end_row();
+                        ui.label(muted(t("Lager")));
+                        ui.checkbox(&mut a.track_stock, t("Lagerbestand führen"));
+                        ui.end_row();
+                        if a.track_stock {
+                            ui.label(muted(t("Mindestbestand")));
+                            qty_edit(ui, Id::unique("art_min"), &mut a.min_stock, 80.0);
+                            ui.end_row();
+                            if a.id != 0 {
+                                ui.label(muted(t("Bestand")));
+                                ui.label(RichText::new(format!("{} {}", fmt_qty(self.data.stock_of(a.id)), a.unit)).strong());
+                                ui.end_row();
+                            }
+                        }
+                    }
                 });
             ui.add_space(10.0);
             ui.horizontal(|ui| {
@@ -546,7 +592,7 @@ impl App {
         let mut save = false;
         let mut delete = false;
         let mut open_doc = None;
-        let linked = b.doc_id.is_some() || b.receipt_id.is_some();
+        let linked = b.is_linked();
         let mut open_receipt = None;
         let modal = egui::Modal::new(Id::unique("booking")).show(ctx, |ui| {
             ui.set_width(540.0);
@@ -556,7 +602,9 @@ impl App {
                 (false, _) => t("Buchung"),
             };
             ui.label(RichText::new(title).size(18.0).strong());
-            if let Some(rid) = b.receipt_id {
+            if b.bank_tx.is_some() && b.receipt_id.is_none() {
+                ui.label(muted(t("Diese Buchung entstand aus einem Bankumsatz und wird unter „Bank“ verwaltet.")));
+            } else if let Some(rid) = b.receipt_id {
                 ui.label(muted(t("Diese Buchung stammt aus dem Belegeingang und wird dort verwaltet.")));
                 if ui.link(t("Zum Originalbeleg")).clicked() {
                     open_receipt = Some(rid);
@@ -617,12 +665,22 @@ impl App {
                         ui.label(muted(t("Steuersatz")));
                         vat_combo(ui, "b_vat", &mut b.vat);
                         ui.end_row();
+                        if b.kind == BookingKind::Ausgabe {
+                            ui.label("");
+                            ui.checkbox(&mut b.reverse_charge, t("Ausländischer Lieferant, ich schulde die Umsatzsteuer (§ 13b)"))
+                                .on_hover_text(t("z. B. Werbung bei Google oder Meta aus Irland: Die Rechnung hat keine Umsatzsteuer. Der Betrag ist netto; die Steuer wird geschuldet und gleichzeitig als Vorsteuer abgezogen."));
+                            ui.end_row();
+                        }
                         ui.label(muted(t("davon")));
-                        ui.label(tf!(
-                            "netto {} · Steuer {}",
-                            fmt_money(b.net()),
-                            fmt_money(b.tax())
-                        ));
+                        if b.reverse_charge {
+                            ui.label(tf!("netto {} · Steuer {} (geschuldet und abziehbar)", fmt_money(b.net()), fmt_money(b.reverse_charge_tax())));
+                        } else {
+                            ui.label(tf!(
+                                "netto {} · Steuer {}",
+                                fmt_money(b.net()),
+                                fmt_money(b.tax())
+                            ));
+                        }
                         ui.end_row();
                         ui.label(muted(t("Zahlungsweg")));
                         ui.horizontal(|ui| {
@@ -633,6 +691,9 @@ impl App {
                         ui.end_row();
                     });
             });
+            if b.category == ASSET_CATEGORY {
+                ui.label(muted(t("Anlagegüter werden nicht sofort als Ausgabe gezählt, sondern über die Nutzungsdauer abgeschrieben. Nach dem Speichern unter „Anlagen“ erfassen.")));
+            }
             ui.add_space(10.0);
             ui.horizontal(|ui| {
                 if !linked && primary(ui, t("Speichern")).clicked() {
@@ -656,10 +717,21 @@ impl App {
         if save {
             if b.gross <= 0 {
                 self.error(t("Bitte einen Betrag größer als 0 eingeben."));
-            } else if self.run(Op::SaveBooking(b.clone())).is_ok() {
+            } else if let Ok(id) = self.run(Op::SaveBooking(b.clone())) {
                 self.info(t("Buchung gespeichert."));
                 self.booking_year = b.date.year();
                 keep = false;
+                // A fixed asset goes on into the asset register.
+                if b.category == ASSET_CATEGORY && !self.data.assets.iter().any(|a| a.booking_id == id) {
+                    self.books.tab = books::BooksTab::Anlagen;
+                    self.books.asset_edit = Some(Asset {
+                        name: b.text.clone(),
+                        date: b.date,
+                        cost: b.net(),
+                        booking_id: id,
+                        ..Asset::default()
+                    });
+                }
             }
         }
         if delete {

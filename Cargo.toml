@@ -11,7 +11,7 @@ default-run = "openkontor"
 #   cargo build --release --no-default-features --bin openkontor-server
 [features]
 default = ["gui"]
-gui = ["dep:eframe", "dep:rfd", "dep:image"]
+gui = ["dep:eframe", "dep:rfd", "dep:image", "dep:qrcode"]
 
 [[bin]]
 name = "openkontor"
@@ -33,6 +33,7 @@ lettre = { version = "0.11.23", default-features = false, features = ["builder",
 lopdf = { version = "0.47.0", default-features = false }
 mail-parser = "1.0.1"
 postgres = { version = "0.19.14", features = ["with-chrono-0_4"] }
+qrcode = { version = "0.14.1", default-features = false, optional = true }
 rfd = { version = "0.18.0", optional = true }
 ring = "0.17.14"
 roxmltree = "0.21.2"
@@ -44,3 +45,21 @@ tiny_http = "0.12.0"
 ttf-parser = "0.25.1"
 ureq = { version = "3.5.1", features = ["json"] }
 webpki-roots = "1.0.11"
+
+# Linux package (cargo deb --no-build), built by the release workflow.
+[package.metadata.deb]
+maintainer = "OpenKontor"
+copyright = "OpenKontor contributors"
+extended-description = "Rechnungen, Angebote, Belegeingang, Bank und Buchhaltung für kleine Firmen – Arbeitsplatz (openkontor) und Server (openkontor-server)."
+section = "office"
+priority = "optional"
+depends = "$auto"
+recommends = "tesseract-ocr, tesseract-ocr-deu, poppler-utils"
+maintainer-scripts = "deploy/deb/"
+assets = [
+    ["target/release/openkontor", "usr/bin/", "755"],
+    ["target/release/openkontor-server", "usr/bin/", "755"],
+    ["deploy/deb/openkontor-server.service", "lib/systemd/system/", "644"],
+    ["README.md", "usr/share/doc/openkontor/", "644"],
+    ["SERVER-INSTALLATION.md", "usr/share/doc/openkontor/", "644"],
+]

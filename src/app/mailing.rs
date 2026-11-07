@@ -346,6 +346,7 @@ impl App {
                 ui.end_row();
             });
             ui.label(muted(t("Microsoft 365: Für das Postfach muss „Authentifiziertes SMTP“ erlaubt sein; bei Google ein App-Passwort verwenden.")));
+            super::settings_more::microsoft_app_editor(ui, "mail_ms", &mut s.microsoft, *password_set, "SMTP.SendAsApp");
             ui.add_space(6.0);
             ui.horizontal(|ui| {
                 if primary(ui, t("Speichern")).clicked() {

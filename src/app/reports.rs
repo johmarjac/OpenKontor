@@ -9,11 +9,18 @@ fn money_cell(ui: &mut Ui, text: RichText) {
 impl App {
     pub(super) fn reports(&mut self, ui: &mut Ui) {
         let years = self.years();
-        ui.horizontal(|ui| {
-            ui.selectable_value(&mut self.report_tab, ReportTab::Euer, t("Einnahmen-Überschuss-Rechnung"));
+        ui.horizontal_wrapped(|ui| {
+            ui.selectable_value(&mut self.report_tab, ReportTab::Euer, t("EÜR"));
+            ui.selectable_value(&mut self.report_tab, ReportTab::AnlageEuer, t("Anlage EÜR"));
             ui.selectable_value(&mut self.report_tab, ReportTab::Ustva, t("Umsatzsteuer-Voranmeldung"));
+            ui.selectable_value(&mut self.report_tab, ReportTab::Zm, t("Zusammenfassende Meldung"));
+            ui.selectable_value(&mut self.report_tab, ReportTab::Bilanz, t("GuV & Bilanz"));
             ui.selectable_value(&mut self.report_tab, ReportTab::OffenePosten, t("Offene Posten"));
             ui.selectable_value(&mut self.report_tab, ReportTab::Kunden, t("Umsatz je Kunde"));
+            ui.selectable_value(&mut self.report_tab, ReportTab::Exporte, t("Exporte"));
+        });
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 egui::ComboBox::from_id_salt("r_period")
                     .selected_text(self.report_period.label())
@@ -45,9 +52,13 @@ impl App {
         let mut open = None;
         ScrollArea::vertical().auto_shrink(false).show(ui, |ui| match self.report_tab {
             ReportTab::Euer => self.report_euer(ui, &r, &range),
+            ReportTab::AnlageEuer => self.report_anlage_euer(ui),
             ReportTab::Ustva => self.report_ustva(ui, &r, &range),
+            ReportTab::Zm => self.report_zm(ui, from, to, &range),
+            ReportTab::Bilanz => self.report_statements(ui),
             ReportTab::OffenePosten => open = self.report_open_items(ui),
             ReportTab::Kunden => self.report_customers(ui, from, to, &range),
+            ReportTab::Exporte => self.report_exports(ui, from, to, &range),
         });
         if open.is_some() {
             self.open_doc(open);
@@ -58,7 +69,12 @@ impl App {
         card(ui, |ui| {
             ui.set_width(ui.available_width().min(780.0));
             card_title(ui, &tf!("Einnahmen-Überschuss-Rechnung · {}", range));
-            ui.label(muted(t("Beträge netto nach Zahlungsdatum. Privatentnahmen und -einlagen sind nicht enthalten.")));
+            ui.label(muted(t("Beträge netto nach Zahlungsdatum; Umsatzsteuer und Vorsteuer zählen wie in der Anlage EÜR mit. Privatentnahmen und -einlagen sind nicht enthalten.")));
+            if r.afa > 0 {
+                ui.label(muted(t("Abschreibungen der Anlagegüter sind enthalten.")));
+            } else if !self.data.assets.is_empty() {
+                ui.label(muted(t("Abschreibungen der Anlagegüter erscheinen in der Jahresansicht.")));
+            }
             ui.add_space(6.0);
             egui::Grid::new("euer")
                 .num_columns(2)
@@ -74,10 +90,10 @@ impl App {
                         ui.end_row();
                     }
                     ui.label(muted(t("Vereinnahmte Umsatzsteuer")));
-                    money_cell(ui, muted(fmt_money(r.vat_collected)));
+                    money_cell(ui, muted(fmt_money(r.vat_collected - r.rc_tax)));
                     ui.end_row();
                     ui.label(RichText::new(t("Summe Betriebseinnahmen")).strong());
-                    money_cell(ui, RichText::new(fmt_money(r.income_net)).strong());
+                    money_cell(ui, RichText::new(fmt_money(r.income_net + r.vat_collected - r.rc_tax)).strong());
                     ui.end_row();
                     ui.label("");
                     ui.end_row();
@@ -89,10 +105,10 @@ impl App {
                         ui.end_row();
                     }
                     ui.label(muted(t("Gezahlte Vorsteuer")));
-                    money_cell(ui, muted(fmt_money(r.vat_paid)));
+                    money_cell(ui, muted(fmt_money(r.vat_paid - r.rc_tax)));
                     ui.end_row();
                     ui.label(RichText::new(t("Summe Betriebsausgaben")).strong());
-                    money_cell(ui, RichText::new(fmt_money(r.expense_net)).strong());
+                    money_cell(ui, RichText::new(fmt_money(r.expense_net + r.vat_paid - r.rc_tax)).strong());
                     ui.end_row();
                     ui.label("");
                     ui.end_row();
@@ -133,10 +149,19 @@ impl App {
                     let rows = [
                         ("81", "Steuerpflichtige Umsätze 19 %", Some(r.base_19), Some(r.tax_19)),
                         ("86", "Steuerpflichtige Umsätze 7 %", Some(r.base_7), Some(r.tax_7)),
-                        ("48", "Steuerfreie Umsätze", Some(r.base_0), None),
-                        ("66", "Abziehbare Vorsteuerbeträge", None, Some(r.vat_paid)),
+                        ("41", "Innergemeinschaftliche Lieferungen an Abnehmer mit USt-IdNr.", Some(r.eu_deliveries), None),
+                        ("21", "Nicht steuerbare sonstige Leistungen in anderen EU-Ländern", Some(r.eu_services), None),
+                        ("43", "Weitere steuerfreie Umsätze mit Vorsteuerabzug (z. B. Ausfuhr)", Some(r.exports), None),
+                        ("45", "Übrige nicht steuerbare Umsätze (Leistungsort nicht im Inland)", Some(r.non_taxable), None),
+                        ("48", "Steuerfreie Umsätze ohne Vorsteuerabzug", Some(r.base_0), None),
+                        ("46/47", "Leistungen ausländischer Unternehmer (§ 13b), Steuer geschuldet", Some(r.rc_base), Some(r.rc_tax)),
+                        ("66", "Abziehbare Vorsteuerbeträge", None, Some(r.vat_paid - r.rc_tax)),
+                        ("67", "Vorsteuer aus Leistungen nach § 13b", None, Some(r.rc_tax)),
                     ];
                     for (kz, text, base, tax) in rows {
+                        if base == Some(0) && tax.is_none_or(|t| t == 0) && !matches!(kz, "81" | "86" | "66") {
+                            continue;
+                        }
                         ui.label(RichText::new(kz).strong().color(ACCENT));
                         ui.label(t(text));
                         money_cell(ui, RichText::new(base.map(fmt_money).unwrap_or_default()));

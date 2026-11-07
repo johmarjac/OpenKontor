@@ -23,6 +23,10 @@ pub struct ClientConfig {
     pub user: String,
     /// Interface language; `None` follows the operating system.
     pub language: Option<crate::i18n::Lang>,
+    /// Company (Mandant) on the server; empty = the first one.
+    pub tenant: String,
+    /// Look on GitHub for a newer version at start.
+    pub check_updates: bool,
 }
 
 impl Default for ClientConfig {
@@ -32,6 +36,8 @@ impl Default for ClientConfig {
             server_url: format!("http://localhost:{}", crate::server::DEFAULT_PORT),
             user: "admin".into(),
             language: None,
+            tenant: String::new(),
+            check_updates: true,
         }
     }
 }
@@ -69,6 +75,10 @@ pub struct Remote {
     pub server_name: String,
     /// The server offers Microsoft 365 sign-in.
     pub sso_enabled: bool,
+    /// Two-factor sign-in is switched on for this user.
+    pub totp_enabled: bool,
+    pub tenant: String,
+    pub tenant_name: String,
     agent: ureq::Agent,
     revision: Arc<AtomicU64>,
     stop: Arc<AtomicBool>,
@@ -101,6 +111,26 @@ pub fn normalize_url(url: &str) -> String {
     }
 }
 
+/// Marks the error "password right, code from the authenticator app needed".
+pub const NEED_CODE: char = '\u{1}';
+
+/// What the server tells before signing in: its name and companies.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct ServerInfo {
+    pub name: String,
+    pub tenants: Vec<crate::server::TenantInfo>,
+    pub version: String,
+}
+
+pub fn server_info(url: &str) -> Result<ServerInfo, String> {
+    let config = ureq::Agent::config_builder()
+        .timeout_global(Some(Duration::from_secs(4)))
+        .http_status_as_error(false)
+        .build();
+    read(ureq::Agent::new_with_config(config).get(format!("{}/api/info", normalize_url(url))).call())
+}
+
 /// Reads a JSON reply, turning the server's error messages into plain text.
 fn read<T: for<'de> Deserialize<'de>>(
     res: Result<ureq::http::Response<ureq::Body>, ureq::Error>,
@@ -115,7 +145,7 @@ fn read<T: for<'de> Deserialize<'de>>(
         .map_err(|e| format!("Antwort unlesbar: {e}"))?;
     if status >= 400 {
         return Err(serde_json::from_str::<ErrorReply>(&text)
-            .map(|e| e.error)
+            .map(|e| if e.need_code { format!("{NEED_CODE}{}", e.error) } else { e.error })
             .unwrap_or_else(|_| format!("Fehler {status}")));
     }
     serde_json::from_str(&text).map_err(|e| format!("Antwort unlesbar: {e}"))
@@ -127,15 +157,18 @@ impl Remote {
         url: &str,
         user: &str,
         password: &str,
+        code: &str,
+        tenant: &str,
         ctx: eframe::egui::Context,
     ) -> Result<(Remote, Data), String> {
         let base = normalize_url(url);
         let agent = make_agent();
-        let login: LoginReply = read(
-            agent
-                .post(format!("{base}/api/login"))
-                .send_json(LoginRequest { user: user.into(), password: password.into() }),
-        )?;
+        let login: LoginReply = read(agent.post(format!("{base}/api/login")).send_json(LoginRequest {
+            user: user.into(),
+            password: password.into(),
+            code: code.into(),
+            tenant: tenant.into(),
+        }))?;
         Self::start(base, agent, login, ctx)
     }
 
@@ -143,12 +176,17 @@ impl Remote {
     pub fn connect_sso(
         url: &str,
         proof: &crate::sso_client::SsoResult,
+        tenant: &str,
         ctx: eframe::egui::Context,
     ) -> Result<(Remote, Data), String> {
         let base = normalize_url(url);
         let agent = make_agent();
         let login: LoginReply = read(agent.post(format!("{base}/api/login/sso")).send_json(
-            crate::server::SsoLoginRequest { id_token: proof.id_token.clone(), nonce: proof.nonce.clone() },
+            crate::server::SsoLoginRequest {
+                id_token: proof.id_token.clone(),
+                nonce: proof.nonce.clone(),
+                tenant: tenant.into(),
+            },
         ))?;
         Self::start(base, agent, login, ctx)
     }
@@ -208,6 +246,9 @@ impl Remote {
                 role: login.role,
                 server_name: login.server_name,
                 sso_enabled: login.sso_enabled,
+                totp_enabled: login.totp_enabled,
+                tenant: login.tenant,
+                tenant_name: login.tenant_name,
                 agent,
                 revision,
                 stop,
@@ -250,6 +291,58 @@ impl Remote {
             }
         }
         newest
+    }
+
+    pub fn tenants(&self) -> Result<Vec<crate::server::TenantInfo>, String> {
+        read(self.agent.get(format!("{}/api/tenants", self.base)).header("Authorization", self.auth()).call())
+    }
+
+    pub fn create_tenant(&self, name: &str) -> Result<Vec<crate::server::TenantInfo>, String> {
+        read(
+            self.agent
+                .post(format!("{}/api/tenants", self.base))
+                .header("Authorization", self.auth())
+                .send_json(serde_json::json!({ "name": name })),
+        )
+    }
+
+    pub fn totp_start(&self) -> Result<crate::server::TotpStart, String> {
+        read(self.agent.post(format!("{}/api/totp/start", self.base)).header("Authorization", self.auth()).send_json(serde_json::json!({})))
+    }
+
+    pub fn totp_enable(&self, code: &str) -> Result<(), String> {
+        read::<serde_json::Value>(
+            self.agent
+                .post(format!("{}/api/totp/enable", self.base))
+                .header("Authorization", self.auth())
+                .send_json(serde_json::json!({ "code": code })),
+        )
+        .map(|_| ())
+    }
+
+    /// Switches two-factor sign-in off: for oneself with the password, or (administrators) for another user.
+    pub fn totp_disable(&self, user: &str, password: &str) -> Result<(), String> {
+        read::<serde_json::Value>(
+            self.agent
+                .post(format!("{}/api/totp/disable", self.base))
+                .header("Authorization", self.auth())
+                .send_json(serde_json::json!({ "user": user, "password": password })),
+        )
+        .map(|_| ())
+    }
+
+    /// The DATEV package with the receipt files, made by the server.
+    pub fn datev_export(&self, from: chrono::NaiveDate, to: chrono::NaiveDate) -> Result<Vec<u8>, String> {
+        let mut res = self
+            .agent
+            .get(format!("{}/api/export/datev?from={}&to={}", self.base, from, to))
+            .header("Authorization", self.auth())
+            .call()
+            .map_err(|e| format!("Server nicht erreichbar ({e})."))?;
+        if res.status().as_u16() >= 400 {
+            return Err(format!("Fehler {}", res.status().as_u16()));
+        }
+        res.body_mut().with_config().limit(2 * 1024 * 1024 * 1024).read_to_vec().map_err(|e| e.to_string())
     }
 
     pub fn users(&self) -> Result<Vec<UserInfo>, String> {
@@ -643,6 +736,22 @@ impl Backend {
         match self {
             Backend::Remote(r) => r.role == Role::Admin,
             _ => true,
+        }
+    }
+
+    /// Whether the signed-in user may change things of this kind.
+    pub fn allows(&self, area: model::OpArea) -> bool {
+        match self {
+            Backend::Remote(r) => r.role.allows(area),
+            _ => true,
+        }
+    }
+
+    /// The DATEV package (booking batch and receipt files) for a period.
+    pub fn datev_package(&self, data: &Data, from: chrono::NaiveDate, to: chrono::NaiveDate) -> Result<Vec<u8>, String> {
+        match self {
+            Backend::Remote(r) => r.datev_export(from, to),
+            _ => Ok(crate::exports::datev_package(data, from, to, &mut |id| self.receipt_file(id).ok())),
         }
     }
 }

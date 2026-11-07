@@ -6,8 +6,14 @@
 // Shares the data model with the workplace program; not every helper is used here.
 #![allow(dead_code)]
 
+#[path = "../accounting.rs"]
+mod accounting;
+#[path = "../bank.rs"]
+mod bank;
 #[path = "../einvoice.rs"]
 mod einvoice;
+#[path = "../exports.rs"]
+mod exports;
 #[path = "../i18n.rs"]
 mod i18n;
 #[path = "../imap.rs"]
@@ -18,6 +24,8 @@ mod inbox;
 mod mail;
 #[path = "../model.rs"]
 mod model;
+#[path = "../oauth_mail.rs"]
+mod oauth_mail;
 #[path = "../ocr.rs"]
 mod ocr;
 #[path = "../pdf.rs"]
@@ -30,6 +38,12 @@ mod server;
 mod sso;
 #[path = "../store.rs"]
 mod store;
+#[path = "../tls.rs"]
+mod tls;
+#[path = "../totp.rs"]
+mod totp;
+#[path = "../webapp.rs"]
+mod webapp;
 #[path = "../xrechnung.rs"]
 mod xrechnung;
 

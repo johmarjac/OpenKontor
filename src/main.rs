@@ -7,16 +7,20 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod accounting;
 mod app;
 mod backend;
+mod bank;
 mod einvoice;
 mod export;
+mod exports;
 mod i18n;
 mod icons;
 mod imap;
 mod inbox;
 mod mail;
 mod model;
+mod oauth_mail;
 mod ocr;
 mod pdf;
 mod pdf_metrics;
@@ -24,7 +28,10 @@ mod server;
 mod sso;
 mod sso_client;
 mod store;
+mod tls;
+mod totp;
 mod ui_kit;
+mod webapp;
 mod xrechnung;
 
 use std::sync::atomic::AtomicBool;

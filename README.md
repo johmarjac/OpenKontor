@@ -44,7 +44,9 @@ Den Server für den Dauerbetrieb einrichten: [SERVER-INSTALLATION.md](SERVER-INS
 - PDF-Export direkt aus dem Programm (A4, Anschriftfeld für Fensterumschläge nach DIN 5008,
   mehrseitig mit Seitenzahlen) – ohne Browser oder Zusatzprogramme
 - Protokoll: jede Änderung mit Zeit und Benutzer
-- Benutzer mit Rollen (Administrator, Buchhaltung, Nur lesen), Datensicherung und -wiederherstellung
+- Benutzer mit Rollen (Administrator, Buchhaltung, Vertrieb, Belegerfassung, Nur lesen),
+  Zwei-Faktor-Anmeldung (Authenticator-App), mehrere Firmen (Mandanten) auf einem Server,
+  Datensicherung und -wiederherstellung
 - E-Mail-Versand von Angeboten, Rechnungen, Gutschriften und Mahnungen (Zahlungserinnerung bis letzte Mahnung, mit Gebühren) samt PDF, eigene E-Mail-Texte auf Deutsch und Englisch, Versandverlauf am Beleg
 - **E-Rechnungen ausstellen:** ZUGFeRD/Factur-X (PDF/A-3 mit eingebetteten Daten, Profil EN 16931)
   oder XRechnung 3.0 (XML, z. B. für Behörden mit Leitweg-ID) – pro Kunde einstellbar, beim
@@ -54,6 +56,31 @@ Den Server für den Dauerbetrieb einrichten: [SERVER-INSTALLATION.md](SERVER-INS
   gelesen, PDFs und Fotos per Texterkennung; Vorschläge für Lieferant, Beträge, Steuer und
   Kategorie; Originale unverändert archiviert; automatischer Abruf aus einem Sammelpostfach
 - Optional: Anmeldung mit Microsoft 365 (Single Sign-on über Microsoft Entra ID)
+- **Auftragsabwicklung:** Angebot → Auftragsbestätigung → Lieferschein (ohne Preise, mit
+  Empfangsbestätigung) → Rechnung; Abschlags- und Schlussrechnungen (Abschläge werden
+  abgezogen); Teilzahlungen; wiederkehrende Rechnungen (monatlich bis jährlich, der Server
+  erstellt sie selbst)
+- **Lager:** Bestand je Artikel, Mindestbestand mit Nachbestell-Hinweis, Bestellungen an
+  Lieferanten („Ware erhalten“ bucht ein), Lieferscheine/Rechnungen buchen aus, Inventur
+- **Bank:** Kontoauszüge als CAMT (XML) oder CSV einlesen; Zahlungen werden offenen
+  Rechnungen (auch mit Skonto oder als Teilzahlung) und Eingangsbelegen automatisch
+  zugeordnet, der Rest mit wenigen Klicks gebucht
+- **Kassenbuch** mit laufendem Bestand, Prüfung gegen negativen Bestand und Tagesabschluss
+  (danach gesperrt, GoBD)
+- **Anlagenverzeichnis** mit Abschreibung (linear nach Monaten, GWG, Sammelposten), fließt in
+  die EÜR ein
+- **EU-Geschäfte:** innergemeinschaftliche Lieferung, Reverse Charge, Ausfuhr, Leistungen
+  außerhalb der EU – mit Hinweisen auf der Rechnung, passender E-Rechnung,
+  UStVA-Kennzahlen 41/21/43/45, § 13b für eingekaufte Leistungen (46/47/67) und
+  **Zusammenfassende Meldung**
+- **Anlage EÜR** (gruppiert wie das Formular, als PDF), **doppelte Buchführung** mit
+  SKR 03 oder SKR 04, Umbuchungen, **GuV und Bilanz** (als PDF)
+- **Exporte:** DATEV-Buchungsstapel mit Originalbelegen, GoBD-Datenexport für die
+  Betriebsprüfung (index.xml + CSV), Vorlage der Verfahrensdokumentation (PDF)
+- Eigenes **Logo** auf allen PDFs
+- **Handy-Version:** Der Server liefert unter seiner Adresse eine Web-App für Smartphone und
+  Tablet (Beleg fotografieren, offene Rechnungen, Ausgabe erfassen, Kontakte) – auf den
+  Startbildschirm legbar, ohne App-Store
 
 ## Zwei Programme
 
@@ -89,7 +116,8 @@ oder über Umgebungsvariablen (praktisch für systemd und Docker):
     OPENKONTOR_DATABASE_URL=postgres://openkontor:geheim@localhost/openkontor
     OPENKONTOR_PORT=8470
 
-Weitere Optionen: `openkontor-server --help` (`--port`, `--bind`, `--data`, `--name`).
+Weitere Optionen: `openkontor-server --help` (`--port`, `--bind`, `--data`, `--name`,
+`--tls-cert`, `--tls-key`).
 
 Tabellen:
 
@@ -102,7 +130,13 @@ Tabellen:
 | `bookings`       | Einnahmen und Ausgaben (Beträge in Cent)                     |
 | `change_log`     | Protokoll aller Änderungen – wird nie gelöscht               |
 | `users`          | Benutzer, Rollen, Passwort-Hashes (gesalzen)                 |
-| `settings`       | Firmendaten, Nummernkreise, interne Zähler                   |
+| `settings`       | Firmendaten, Nummernkreise, interne Zähler, Kassenabschlüsse |
+| `receipts`, `receipt_files` | Belegeingang und Originaldateien                  |
+| `records`        | Bankumsätze, Anlagen, wiederkehrende Rechnungen, Lagerbewegungen, Umbuchungen (JSON) |
+
+Neuere Felder einer Zeile stehen in der Spalte `extra` (JSON), damit Updates keine
+Tabellenänderungen brauchen. Weitere Firmen (Mandanten) bekommen je ein eigenes Schema
+(`ok_<name>`) in derselben Datenbank.
 
 Datensicherung: regelmäßig `pg_dump openkontor > sicherung.sql`. Zusätzlich schreibt der
 Server einmal am Tag eine lesbare Kopie aller Daten als JSON in den Ordner `Sicherungen`
@@ -141,62 +175,48 @@ Weitere Sprachen: in `src/i18n.rs` eine Spalte ergänzen; ein Test meldet fehlen
 Ein neuer Datenbestand hat den Benutzer `admin` mit Passwort `admin` – bitte sofort unter
 Einstellungen → Benutzer & Passwort ändern.
 
-Die Arbeitsplätze sprechen HTTP mit dem Server. Für den Zugriff über das Internet den Server
-hinter einen Proxy mit HTTPS (z. B. Caddy oder nginx) stellen und `--bind 127.0.0.1` nutzen.
+Die Arbeitsplätze sprechen HTTP mit dem Server – oder HTTPS, wenn der Server mit
+`--tls-cert` und `--tls-key` gestartet wird (z. B. mit einem Zertifikat von Let's Encrypt).
+Alternativ einen Proxy mit HTTPS (Caddy, nginx) davorstellen und `--bind 127.0.0.1` nutzen.
+
+Weitere Schutzmaßnahmen: Zwei-Faktor-Anmeldung je Benutzer (Einstellungen → Sicherheit),
+Sperre nach acht falschen Passwörtern für fünf Minuten, Rollen mit abgestuften Rechten,
+Microsoft-365-Postfächer ohne gespeichertes Passwort (Anmeldung als App).
 
 ## Was noch fehlt (Stand: November 2026)
 
-Verglichen mit einer kaufmännischen Komplettlösung wie Lexware Premium/Pro, nach Wichtigkeit:
+Die frühere Liste ist fast vollständig umgesetzt. Offen bleiben Punkte, die eine amtliche
+Zulassung, einen Vertrag mit einem Anbieter oder Fachwissen brauchen, das man nicht
+selbst prüfen kann:
 
-**1. Gesetzlich bald nötig**
-- ~~E-Rechnungen ausstellen~~ – erledigt (ZUGFeRD und XRechnung). Noch offen: Versand über
-  das Peppol-Netz bzw. Upload in Behördenportale (bisher per E-Mail oder als Datei).
-- **GoBD-Datenexport für die Betriebsprüfung** („Z3“, Format nach GDPdU) und eine
-  Verfahrensdokumentation als Vorlage.
+- **Lohn und Gehalt:** Lohnabrechnungen und die Meldungen an Krankenkassen und Finanzamt
+  dürfen nur von zertifizierter Software verschickt werden (ITSG-Prüfung, ELStAM-Zugang).
+  Empfehlung: Lohnbüro oder Steuerberatung; die Lohnkosten als Ausgabe „4120 Löhne und
+  Gehälter“ buchen.
+- **Direkte Übermittlung an ELSTER** (Umsatzsteuer-Voranmeldung, Anlage EÜR, ZM an das BZSt):
+  braucht die amtliche Bibliothek ERiC und eine Registrierung als Hersteller. Bis dahin
+  zeigt OpenKontor alle Kennzahlen; man trägt sie in „Mein ELSTER“ bzw. im BZStOnline-Portal ein.
+- **Kontoabruf direkt bei der Bank (FinTS/HBCI):** braucht eine Produkt-Registrierung bei
+  der Deutschen Kreditwirtschaft. Bis dahin: Umsätze im Online-Banking als CAMT oder CSV
+  herunterladen und einlesen.
+- **Versand über das Peppol-Netz:** braucht einen Vertrag mit einem Peppol-Zugangsanbieter.
+  E-Rechnungen gehen bis dahin per E-Mail oder als Datei (Upload in Behördenportale).
+- **Fremdwährungen:** Rechnungen sind in Euro.
+- **Eigene Store-App** für Android/iOS: Die Handy-Version im Browser deckt den Alltag ab;
+  eine Store-App bräuchte Entwicklerkonten bei Apple und Google.
+- **Automatische Installation von Updates:** Das Programm meldet neue Versionen und öffnet
+  die Download-Seite; installiert wird mit dem Installer bzw. Paket.
 
-**2. Großer Nutzen im Alltag**
-- **Bankanbindung:** Kontoauszüge abrufen (FinTS/HBCI) oder importieren (CAMT, CSV) und
-  Zahlungen automatisch offenen Rechnungen und Belegen zuordnen. Bisher wird jede Zahlung von
-  Hand gebucht.
-- **DATEV-Export** für die Steuerberatung (Buchungsstapel mit Belegbildern) statt nur CSV.
-- **Wiederkehrende Rechnungen** (z. B. Wartungsverträge), Abschlags- und Teilrechnungen,
-  Teilzahlungen.
-- **Kassenbuch** für Bargeld (GoBD-konform, mit Tagesabschluss).
-- **Eigenes Logo und Briefpapier** auf den PDFs.
-
-**3. Steuern und Buchhaltung vertiefen**
-- **Anlagenverzeichnis mit Abschreibungen (AfA)** – gehört auch zur Einnahmen-Überschuss-Rechnung.
-- **Anlage EÜR** und **Umsatzsteuer-Voranmeldung direkt an ELSTER** übermitteln (bisher
-  werden die Kennzahlen angezeigt und von Hand übertragen).
-- **EU-Geschäfte:** Reverse-Charge, innergemeinschaftliche Lieferungen, Zusammenfassende Meldung,
-  Fremdwährungen.
-- **Doppelte Buchführung** mit vollständigem Kontenrahmen (SKR 03/04), Bilanz und GuV – nötig
-  für bilanzierende Firmen (z. B. GmbH). Bisher: Einnahmen-Überschuss-Rechnung.
-
-**4. Weitere Bausteine von Lexware**
-- **Lohn und Gehalt** (Lohnabrechnung, Meldungen an Krankenkassen und Finanzamt).
-- **Warenwirtschaft:** Lagerbestand, Bestellungen, Auftragsbestätigungen, Lieferscheine.
-- **Mehrere Firmen (Mandanten)** auf einem Server.
-- **Smartphone und Tablet** (Android, iOS) – drei mögliche Wege:
-  1. *Web-App vom Server* (empfohlen als erster Schritt): eine schlanke, fürs Handy gestaltete
-     Oberfläche, die der OpenKontor-Server selbst ausliefert und die man im Browser „zum
-     Startbildschirm hinzufügt“. Läuft auf Android und iPhone ohne App-Store, ideal für
-     Belege abfotografieren (Texterkennung macht der Server), offene Rechnungen, Mahnen,
-     Ausgaben erfassen und Kontakte nachschlagen.
-  2. *Eigene Mobil-App* mit demselben Rust-Kern und egui (Android über das NDK, iOS über
-     Xcode): wiederverwendbar, braucht aber eine eigene, berührungsfreundliche Oberfläche und
-     für die Stores ein Apple-Entwicklerkonto (99 $/Jahr) bzw. ein Google-Play-Konto (25 $ einmalig).
-  3. *Desktop-Oberfläche auf dem Tablet:* technisch möglich, aber für kleine Bildschirme und
-     Fingerbedienung nicht gemacht.
-
-**5. Technik und Sicherheit**
-- HTTPS direkt im Server, Zwei-Faktor-Anmeldung, feinere Rechte (z. B. nur Rechnungen).
-- Abruf des Microsoft-365-Postfachs mit Microsofts eigener Anmeldung (bisher Passwort).
-- Programmpakete (Installer für Windows/macOS, Linux-Paket) und automatische Updates.
+**Bitte vor dem Echtbetrieb mit der Steuerberatung abstimmen:** Kontenzuordnung SKR 03/04
+im DATEV-Export, Steuerschlüssel, Bilanzgliederung und die Vorlage der
+Verfahrensdokumentation. Die Rechenregeln sind getestet, ersetzen aber keine Fachberatung.
 
 **Noch nicht unter echten Bedingungen erprobt:** Texterkennung von Scans und Fotos
-(Tesseract), echte Mail-Anbieter beim Versand und beim Sammelpostfach, Anmeldung bei einem
-echten Microsoft-365-Mandanten, das Linux-Installationsskript, das Docker-Image und Windows.
+(Tesseract), echte Mail-Anbieter beim Versand und beim Sammelpostfach (auch die
+Microsoft-365-Anmeldung als App), Anmeldung bei einem echten Microsoft-365-Mandanten,
+DATEV-Import beim Steuerberater, GoBD-Export in einer Prüfsoftware (IDEA), Kontoauszüge
+verschiedener Banken, die Installationspakete (Windows-Installer, DMG, .deb), das
+Linux-Installationsskript, das Docker-Image und Windows.
 
 ## Lizenz
 

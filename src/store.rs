@@ -199,7 +199,60 @@ CREATE TABLE IF NOT EXISTS receipt_files (
     id      BIGINT PRIMARY KEY,
     content BYTEA NOT NULL
 );
+ALTER TABLE contacts ADD COLUMN IF NOT EXISTS extra TEXT NOT NULL DEFAULT '{}';
+ALTER TABLE articles ADD COLUMN IF NOT EXISTS extra TEXT NOT NULL DEFAULT '{}';
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS extra TEXT NOT NULL DEFAULT '{}';
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS extra TEXT NOT NULL DEFAULT '{}';
+ALTER TABLE users ADD COLUMN IF NOT EXISTS extra TEXT NOT NULL DEFAULT '{}';
+CREATE TABLE IF NOT EXISTS records (
+    kind    TEXT NOT NULL,
+    id      BIGINT NOT NULL,
+    content TEXT NOT NULL,
+    PRIMARY KEY (kind, id)
+);
 "#;
+
+const CONTACT_COLUMNS: &[&str] = &[
+    "id", "number", "kind", "company", "person", "street", "zip_city", "country", "email", "phone", "vat_id", "note",
+    "language", "payment_term_id", "buyer_reference", "einvoice",
+];
+const ARTICLE_COLUMNS: &[&str] = &["id", "number", "name", "description", "unit", "price_net", "vat", "service"];
+const DOCUMENT_COLUMNS: &[&str] = &[
+    "id", "kind", "number", "contact_id", "date", "service_date", "due_days", "title", "intro", "outro", "status",
+    "paid_date", "source_id", "term_name", "discounts", "paid_discount_pct", "emails", "reminders", "lines",
+];
+const BOOKING_COLUMNS: &[&str] =
+    &["id", "date", "kind", "category", "text", "partner", "receipt", "gross", "vat", "doc_id", "payment", "receipt_id"];
+const USER_COLUMNS: &[&str] = &["name", "role", "salt", "hash"];
+
+/// Fields without a column of their own are kept as JSON in the `extra` column, so new
+/// fields need no new columns.
+fn extra_of<T: Serialize>(v: &T, columns: &[&str]) -> String {
+    let Ok(serde_json::Value::Object(mut m)) = serde_json::to_value(v) else {
+        return "{}".into();
+    };
+    for c in columns {
+        m.remove(*c);
+    }
+    serde_json::Value::Object(m).to_string()
+}
+
+/// Puts the fields from the `extra` column back into a record read from its columns.
+fn with_extra<T: Serialize + DeserializeOwned>(v: T, extra: &str) -> T {
+    let Ok(serde_json::Value::Object(add)) = serde_json::from_str::<serde_json::Value>(extra) else {
+        return v;
+    };
+    if add.is_empty() {
+        return v;
+    }
+    let Ok(serde_json::Value::Object(mut m)) = serde_json::to_value(&v) else {
+        return v;
+    };
+    for (k, val) in add {
+        m.insert(k, val);
+    }
+    serde_json::from_value(serde_json::Value::Object(m)).unwrap_or(v)
+}
 
 /// The change log is never deleted from the database; the workplaces see the newest entries.
 const LOG_SHOWN: i64 = 5000;
@@ -207,6 +260,8 @@ const LOG_SHOWN: i64 = 5000;
 pub struct PgStore {
     url: String,
     client: Client,
+    /// Own schema of a further company (Mandant); `None` for the main one.
+    schema: Option<String>,
 }
 
 fn pg_err(e: postgres::Error) -> String {
@@ -248,16 +303,37 @@ fn same_entry(a: &LogEntry, b: &LogEntry) -> bool {
 }
 
 impl PgStore {
-    pub fn connect(url: &str) -> Result<PgStore, String> {
-        let mut client = Client::connect(url, NoTls).map_err(pg_err)?;
+    /// Connects to the tables of one company; further companies live in their own schema.
+    pub fn connect_in(url: &str, schema: Option<String>) -> Result<PgStore, String> {
+        let schema = schema.map(|s| s.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '_').collect::<String>());
+        let mut client = Self::open(url, schema.as_deref())?;
         client.batch_execute(SCHEMA).map_err(pg_err)?;
-        Ok(PgStore { url: url.to_string(), client })
+        Ok(PgStore { url: url.to_string(), client, schema })
+    }
+
+    fn open(url: &str, schema: Option<&str>) -> Result<Client, String> {
+        let mut client = Client::connect(url, NoTls).map_err(pg_err)?;
+        if let Some(s) = schema {
+            client
+                .batch_execute(&format!("CREATE SCHEMA IF NOT EXISTS \"{s}\"; SET search_path TO \"{s}\";"))
+                .map_err(pg_err)?;
+        }
+        Ok(client)
+    }
+
+    /// Schemas in the database (further companies are named ok_…).
+    pub fn schemas(url: &str) -> Result<Vec<String>, String> {
+        let mut client = Client::connect(url, NoTls).map_err(pg_err)?;
+        let rows = client
+            .query("SELECT schema_name FROM information_schema.schemata WHERE schema_name LIKE 'ok\\_%'", &[])
+            .map_err(pg_err)?;
+        Ok(rows.iter().map(|r| r.get::<_, String>(0)).collect())
     }
 
     /// Reconnects once if the database connection was lost (e.g. after a database restart).
     fn ensure_connected(&mut self) -> Result<(), String> {
         if self.client.is_closed() {
-            self.client = Client::connect(&self.url, NoTls).map_err(pg_err)?;
+            self.client = Self::open(&self.url, self.schema.as_deref())?;
         }
         Ok(())
     }
@@ -275,17 +351,18 @@ impl PgStore {
     fn put_contact(tx: &mut Transaction<'_>, c: &Contact) -> Result<(), String> {
         tx.execute(
             "INSERT INTO contacts (id, number, kind, company, person, street, zip_city, country, email, phone, vat_id, note,
-               language, payment_term_id, buyer_reference, einvoice)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+               language, payment_term_id, buyer_reference, einvoice, extra)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
              ON CONFLICT (id) DO UPDATE SET number=EXCLUDED.number, kind=EXCLUDED.kind, company=EXCLUDED.company,
                person=EXCLUDED.person, street=EXCLUDED.street, zip_city=EXCLUDED.zip_city, country=EXCLUDED.country,
                email=EXCLUDED.email, phone=EXCLUDED.phone, vat_id=EXCLUDED.vat_id, note=EXCLUDED.note,
                language=EXCLUDED.language, payment_term_id=EXCLUDED.payment_term_id,
-               buyer_reference=EXCLUDED.buyer_reference, einvoice=EXCLUDED.einvoice",
+               buyer_reference=EXCLUDED.buyer_reference, einvoice=EXCLUDED.einvoice, extra=EXCLUDED.extra",
             &[
                 &(c.id as i64), &c.number, &name_of(&c.kind), &c.company, &c.person, &c.street,
                 &c.zip_city, &c.country, &c.email, &c.phone, &c.vat_id, &c.note, &c.language.code(),
                 &c.payment_term_id.map(|v| v as i64), &c.buyer_reference, &c.einvoice.map(|f| name_of(&f)),
+                &extra_of(c, CONTACT_COLUMNS),
             ],
         )
         .map_err(pg_err)?;
@@ -294,14 +371,14 @@ impl PgStore {
 
     fn put_article(tx: &mut Transaction<'_>, a: &Article) -> Result<(), String> {
         tx.execute(
-            "INSERT INTO articles (id, number, name, description, unit, price_net_cents, vat_percent, service)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+            "INSERT INTO articles (id, number, name, description, unit, price_net_cents, vat_percent, service, extra)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
              ON CONFLICT (id) DO UPDATE SET number=EXCLUDED.number, name=EXCLUDED.name, description=EXCLUDED.description,
                unit=EXCLUDED.unit, price_net_cents=EXCLUDED.price_net_cents, vat_percent=EXCLUDED.vat_percent,
-               service=EXCLUDED.service",
+               service=EXCLUDED.service, extra=EXCLUDED.extra",
             &[
                 &(a.id as i64), &a.number, &a.name, &a.description, &a.unit, &a.price_net,
-                &(a.vat as i16), &a.service,
+                &(a.vat as i16), &a.service, &extra_of(a, ARTICLE_COLUMNS),
             ],
         )
         .map_err(pg_err)?;
@@ -311,14 +388,14 @@ impl PgStore {
     fn put_document(tx: &mut Transaction<'_>, d: &Document) -> Result<(), String> {
         tx.execute(
             "INSERT INTO documents (id, kind, number, contact_id, doc_date, service_date, due_days, title, intro, outro,
-               status, paid_date, source_id, term_name, discounts, paid_discount_pct, emails, reminders)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+               status, paid_date, source_id, term_name, discounts, paid_discount_pct, emails, reminders, extra)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
              ON CONFLICT (id) DO UPDATE SET kind=EXCLUDED.kind, number=EXCLUDED.number, contact_id=EXCLUDED.contact_id,
                doc_date=EXCLUDED.doc_date, service_date=EXCLUDED.service_date, due_days=EXCLUDED.due_days,
                title=EXCLUDED.title, intro=EXCLUDED.intro, outro=EXCLUDED.outro, status=EXCLUDED.status,
                paid_date=EXCLUDED.paid_date, source_id=EXCLUDED.source_id, term_name=EXCLUDED.term_name,
                discounts=EXCLUDED.discounts, paid_discount_pct=EXCLUDED.paid_discount_pct,
-               emails=EXCLUDED.emails, reminders=EXCLUDED.reminders",
+               emails=EXCLUDED.emails, reminders=EXCLUDED.reminders, extra=EXCLUDED.extra",
             &[
                 &(d.id as i64), &name_of(&d.kind), &d.number, &d.contact_id.map(|v| v as i64),
                 &d.date, &d.service_date, &(d.due_days as i32), &d.title, &d.intro, &d.outro,
@@ -326,6 +403,7 @@ impl PgStore {
                 &serde_json::to_string(&d.discounts).unwrap_or_else(|_| "[]".into()), &d.paid_discount_pct,
                 &serde_json::to_string(&d.emails).unwrap_or_else(|_| "[]".into()),
                 &serde_json::to_string(&d.reminders).unwrap_or_else(|_| "[]".into()),
+                &extra_of(d, DOCUMENT_COLUMNS),
             ],
         )
         .map_err(pg_err)?;
@@ -349,19 +427,44 @@ impl PgStore {
     fn put_booking(tx: &mut Transaction<'_>, b: &Booking) -> Result<(), String> {
         tx.execute(
             "INSERT INTO bookings (id, booking_date, kind, category, text, partner, receipt, gross_cents, vat_percent,
-               document_id, payment, receipt_id)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+               document_id, payment, receipt_id, extra)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
              ON CONFLICT (id) DO UPDATE SET booking_date=EXCLUDED.booking_date, kind=EXCLUDED.kind,
                category=EXCLUDED.category, text=EXCLUDED.text, partner=EXCLUDED.partner, receipt=EXCLUDED.receipt,
                gross_cents=EXCLUDED.gross_cents, vat_percent=EXCLUDED.vat_percent, document_id=EXCLUDED.document_id,
-               payment=EXCLUDED.payment, receipt_id=EXCLUDED.receipt_id",
+               payment=EXCLUDED.payment, receipt_id=EXCLUDED.receipt_id, extra=EXCLUDED.extra",
             &[
                 &(b.id as i64), &b.date, &name_of(&b.kind), &b.category, &b.text, &b.partner,
                 &b.receipt, &b.gross, &(b.vat as i16), &b.doc_id.map(|v| v as i64), &b.payment,
-                &b.receipt_id.map(|v| v as i64),
+                &b.receipt_id.map(|v| v as i64), &extra_of(b, BOOKING_COLUMNS),
             ],
         )
         .map_err(pg_err)?;
+        Ok(())
+    }
+
+    /// Newer kinds of records are kept as JSON in one table.
+    fn write_records<T: Serialize>(
+        tx: &mut Transaction<'_>,
+        kind: &str,
+        old: &[T],
+        new: &[T],
+        id: impl Fn(&T) -> u64,
+    ) -> Result<(), String> {
+        let (changed, removed) = diff(old, new, &id);
+        for x in new.iter().filter(|x| changed.contains(&id(x))) {
+            let json = serde_json::to_string(x).map_err(|e| e.to_string())?;
+            tx.execute(
+                "INSERT INTO records (kind, id, content) VALUES ($1, $2, $3)
+                 ON CONFLICT (kind, id) DO UPDATE SET content = EXCLUDED.content",
+                &[&kind, &(id(x) as i64), &json],
+            )
+            .map_err(pg_err)?;
+        }
+        if !removed.is_empty() {
+            let ids: Vec<i64> = removed.iter().map(|v| *v as i64).collect();
+            tx.execute("DELETE FROM records WHERE kind = $1 AND id = ANY($2)", &[&kind, &ids]).map_err(pg_err)?;
+        }
         Ok(())
     }
 
@@ -417,6 +520,15 @@ impl PgStore {
         }
         Self::delete_ids(tx, "bookings", &removed)?;
 
+        Self::write_records(tx, "bank", &old.bank, &new.bank, |x| x.id)?;
+        Self::write_records(tx, "asset", &old.assets, &new.assets, |x| x.id)?;
+        Self::write_records(tx, "recurring", &old.recurring, &new.recurring, |x| x.id)?;
+        Self::write_records(tx, "stock", &old.stock_moves, &new.stock_moves, |x| x.id)?;
+        Self::write_records(tx, "journal", &old.journal, &new.journal, |x| x.id)?;
+        if !same(&old.cash_closings, &new.cash_closings) {
+            Self::put_setting(tx, "cash_closings", &serde_json::to_string(&new.cash_closings).map_err(|e| e.to_string())?)?;
+        }
+
         // New log entries are the ones after the last entry the old state knew.
         let start = match old.log.last() {
             Some(last) => new
@@ -441,8 +553,8 @@ impl PgStore {
         tx.execute("DELETE FROM users", &[]).map_err(pg_err)?;
         for u in users {
             tx.execute(
-                "INSERT INTO users (name, role, salt, hash) VALUES ($1, $2, $3, $4)",
-                &[&u.name, &name_of(&u.role), &u.salt, &u.hash],
+                "INSERT INTO users (name, role, salt, hash, extra) VALUES ($1, $2, $3, $4, $5)",
+                &[&u.name, &name_of(&u.role), &u.salt, &u.hash, &extra_of(u, USER_COLUMNS)],
             )
             .map_err(pg_err)?;
         }
@@ -473,13 +585,14 @@ impl PgStore {
         for r in c
             .query(
                 "SELECT id, number, kind, company, person, street, zip_city, country, email, phone, vat_id, note,
-                   language, payment_term_id, buyer_reference, einvoice
+                   language, payment_term_id, buyer_reference, einvoice, extra
                  FROM contacts ORDER BY id",
                 &[],
             )
             .map_err(pg_err)?
         {
-            data.contacts.push(Contact {
+            let extra: String = r.get(16);
+            data.contacts.push(with_extra(Contact {
                 id: r.get::<_, i64>(0) as u64,
                 number: r.get(1),
                 kind: from_name(r.get(2))?,
@@ -496,17 +609,19 @@ impl PgStore {
                 payment_term_id: r.get::<_, Option<i64>>(13).map(|v| v as u64),
                 buyer_reference: r.get(14),
                 einvoice: r.get::<_, Option<String>>(15).and_then(|s| from_name(s).ok()),
-            });
+                ..Contact::default()
+            }, &extra));
         }
         for r in c
             .query(
-                "SELECT id, number, name, description, unit, price_net_cents, vat_percent, service
+                "SELECT id, number, name, description, unit, price_net_cents, vat_percent, service, extra
                  FROM articles ORDER BY id",
                 &[],
             )
             .map_err(pg_err)?
         {
-            data.articles.push(Article {
+            let extra: String = r.get(8);
+            data.articles.push(with_extra(Article {
                 id: r.get::<_, i64>(0) as u64,
                 number: r.get(1),
                 name: r.get(2),
@@ -515,7 +630,8 @@ impl PgStore {
                 price_net: r.get(5),
                 vat: r.get::<_, i16>(6) as u8,
                 service: r.get(7),
-            });
+                ..Article::default()
+            }, &extra));
         }
         let mut lines: HashMap<u64, Vec<Line>> = HashMap::new();
         for r in c
@@ -539,14 +655,15 @@ impl PgStore {
         for r in c
             .query(
                 "SELECT id, kind, number, contact_id, doc_date, service_date, due_days, title, intro, outro,
-                   status, paid_date, source_id, term_name, discounts, paid_discount_pct, emails, reminders
+                   status, paid_date, source_id, term_name, discounts, paid_discount_pct, emails, reminders, extra
                  FROM documents ORDER BY id",
                 &[],
             )
             .map_err(pg_err)?
         {
             let id = r.get::<_, i64>(0) as u64;
-            data.documents.push(Document {
+            let extra: String = r.get(18);
+            data.documents.push(with_extra(Document {
                 id,
                 kind: from_name(r.get(1))?,
                 number: r.get(2),
@@ -566,18 +683,20 @@ impl PgStore {
                 emails: serde_json::from_str(r.get::<_, &str>(16)).unwrap_or_default(),
                 reminders: serde_json::from_str(r.get::<_, &str>(17)).unwrap_or_default(),
                 lines: lines.remove(&id).unwrap_or_default(),
-            });
+                ..Document::default()
+            }, &extra));
         }
         for r in c
             .query(
                 "SELECT id, booking_date, kind, category, text, partner, receipt, gross_cents, vat_percent,
-                   document_id, payment, receipt_id
+                   document_id, payment, receipt_id, extra
                  FROM bookings ORDER BY booking_date, id",
                 &[],
             )
             .map_err(pg_err)?
         {
-            data.bookings.push(Booking {
+            let extra: String = r.get(12);
+            data.bookings.push(with_extra(Booking {
                 id: r.get::<_, i64>(0) as u64,
                 date: r.get(1),
                 kind: from_name(r.get(2))?,
@@ -590,13 +709,28 @@ impl PgStore {
                 doc_id: r.get::<_, Option<i64>>(9).map(|v| v as u64),
                 payment: r.get(10),
                 receipt_id: r.get::<_, Option<i64>>(11).map(|v| v as u64),
-            });
+                ..Booking::default()
+            }, &extra));
         }
         for r in c.query("SELECT content FROM receipts ORDER BY id", &[]).map_err(pg_err)? {
             if let Ok(receipt) = serde_json::from_str(r.get::<_, &str>(0)) {
                 data.receipts.push(receipt);
             }
         }
+        for r in c.query("SELECT kind, content FROM records ORDER BY id", &[]).map_err(pg_err)? {
+            let (kind, json): (String, String) = (r.get(0), r.get(1));
+            match kind.as_str() {
+                "bank" => data.bank.extend(serde_json::from_str(&json).ok()),
+                "asset" => data.assets.extend(serde_json::from_str(&json).ok()),
+                "recurring" => data.recurring.extend(serde_json::from_str(&json).ok()),
+                "stock" => data.stock_moves.extend(serde_json::from_str(&json).ok()),
+                "journal" => data.journal.extend(serde_json::from_str(&json).ok()),
+                _ => {}
+            }
+        }
+        data.bank.sort_by_key(|t| (t.date, t.id));
+        data.journal.sort_by_key(|e| e.date);
+        data.cash_closings = settings.get("cash_closings").and_then(|s| serde_json::from_str(s).ok()).unwrap_or_default();
         let mut log: Vec<LogEntry> = c
             .query(
                 "SELECT time_text, user_name, action FROM change_log ORDER BY id DESC LIMIT $1",
@@ -611,15 +745,14 @@ impl PgStore {
 
         let mut users = Vec::new();
         for r in c
-            .query("SELECT name, role, salt, hash FROM users ORDER BY name", &[])
+            .query("SELECT name, role, salt, hash, extra FROM users ORDER BY name", &[])
             .map_err(pg_err)?
         {
-            users.push(User {
-                name: r.get(0),
-                role: from_name(r.get(1))?,
-                salt: r.get(2),
-                hash: r.get(3),
-            });
+            let extra: String = r.get(4);
+            users.push(with_extra(
+                User { name: r.get(0), role: from_name(r.get(1))?, salt: r.get(2), hash: r.get(3), ..User::default() },
+                &extra,
+            ));
         }
         let mail = settings.get("mail").and_then(|s| serde_json::from_str(s).ok()).unwrap_or_default();
         let inbox = settings.get("inbox").and_then(|s| serde_json::from_str(s).ok()).unwrap_or_default();
@@ -660,7 +793,10 @@ impl Store for PgStore {
             Some((_, host)) => host.to_string(),
             None => self.url.clone(),
         };
-        format!("PostgreSQL {shown}")
+        match &self.schema {
+            Some(s) => format!("PostgreSQL {shown} (Schema {s})"),
+            None => format!("PostgreSQL {shown}"),
+        }
     }
 
     fn load(&mut self) -> Result<Option<Stored>, String> {
@@ -692,5 +828,67 @@ impl Store for PgStore {
             }
         }
         tx.commit().map_err(pg_err)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::*;
+
+    /// Everything new survives a round trip through PostgreSQL.
+    /// Runs only with OPENKONTOR_TEST_PG=postgres://… set.
+    #[test]
+    fn postgres_round_trip() {
+        let Ok(url) = std::env::var("OPENKONTOR_TEST_PG") else { return };
+        let mut data = sample_data();
+        let inv = data.documents.iter().find(|d| d.kind == DocKind::Rechnung && d.status == DocStatus::Offen).unwrap().id;
+        data.apply(Op::AddPayment(inv, Payment { date: today(), amount: 1000, discount: 0, method: "Bank".into(), bank_tx: None }), "t").unwrap();
+        let cid = data.contacts[0].id;
+        data.contacts[0].vat_case = VatCase::ReverseCharge;
+        data.contacts[0].iban = "DE02120300000000202051".into();
+        data.articles[0].track_stock = true;
+        data.articles[0].min_stock = 3.0;
+        let aid = data.articles[0].id;
+        data.apply(Op::StockCorrection(aid, 12.0, "Inventur".into()), "t").unwrap();
+        data.apply(Op::SaveAsset(Asset { name: "Laptop".into(), cost: 150_000, years: 3, ..Asset::default() }), "t").unwrap();
+        data.apply(Op::SaveJournal(JournalEntry { debit: "1200".into(), credit: "9000".into(), amount: 500_000, text: "Eröffnung".into(), ..JournalEntry::default() }), "t").unwrap();
+        let mut tpl = Document { contact_id: Some(cid), ..Document::default() };
+        tpl.lines[0].text = "Wartung".into();
+        data.apply(Op::SaveRecurring(Box::new(Recurring { template: tpl, ..Recurring::default() })), "t").unwrap();
+        data.apply(Op::ImportBank(vec![BankTx { date: today(), amount: -4550, name: "Telefon AG".into(), reference: "rt1".into(), ..BankTx::default() }]), "t").unwrap();
+        let tx = data.bank[0].id;
+        data.apply(Op::AssignBank(tx, BankAssign::Booking { category: "4920 Telefon und Internet".into(), vat: 19, text: String::new() }), "t").unwrap();
+        data.company.logo = Some(crate::pdf::make_logo(1, 1, &[1, 2, 3]));
+        data.company.chart = Chart::Skr04;
+        let user = User { name: "a".into(), role: crate::server::Role::Vertrieb, totp: "ABC".into(), ..User::default() };
+        let stored = Stored { data: data.clone(), users: vec![user], revision: 7, mail: Default::default(), inbox: Default::default() };
+        let schema = format!("ok_rt_{}", std::process::id());
+        let mut store = PgStore::connect_in(&url, Some(schema.clone())).unwrap();
+        store.save(&stored, Change::All).unwrap();
+        let back = store.load().unwrap().unwrap();
+        let strip = |d: &Data| {
+            let mut d = d.clone();
+            d.log.clear();
+            let mut v = serde_json::to_value(&d).unwrap();
+            // Bookings come back sorted by date and id.
+            if let Some(b) = v.get_mut("bookings").and_then(|b| b.as_array_mut()) {
+                b.sort_by_key(|x| (x["date"].as_str().unwrap_or("").to_string(), x["id"].as_u64()));
+            }
+            v
+        };
+        assert_eq!(strip(&back.data), strip(&data));
+        assert_eq!(back.users[0].totp, "ABC");
+        assert_eq!(back.users[0].role, crate::server::Role::Vertrieb);
+        // Changes are written as differences.
+        let old = back.data.clone();
+        let mut next = Stored { data: back.data.clone(), ..back };
+        next.data.apply(Op::IgnoreBank(tx), "t").ok();
+        next.data.apply(Op::DeleteAsset(next.data.assets[0].id), "t").unwrap();
+        store.save(&next, Change::Data { old: &old }).unwrap();
+        let again = store.load().unwrap().unwrap();
+        assert!(again.data.assets.is_empty());
+        let mut c = Client::connect(&url, NoTls).unwrap();
+        c.batch_execute(&format!("DROP SCHEMA \"{schema}\" CASCADE")).unwrap();
     }
 }
