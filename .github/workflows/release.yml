@@ -1,0 +1,224 @@
+# Builds OpenKontor for every platform and publishes a GitHub release.
+#
+# Start it by pushing a version tag:   git tag v0.1.0 && git push origin v0.1.0
+# (or by hand under Actions → "Release erstellen" with a version number).
+name: Release erstellen
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Versionsnummer, z. B. 0.1.0"
+        required: true
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows-x64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - name: windows-arm64
+            os: windows-latest
+            target: aarch64-pc-windows-msvc
+          - name: macos-universal
+            os: macos-latest
+            target: universal
+          - name: linux-x64
+            os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - name: linux-arm64
+            os: ubuntu-22.04
+            target: aarch64-unknown-linux-gnu
+            zig: true
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Versionsnummer
+        shell: bash
+        run: |
+          if [ -n "${{ github.event.inputs.version }}" ]; then V="${{ github.event.inputs.version }}"; else V="${GITHUB_REF_NAME#v}"; fi
+          echo "VERSION=$V" >> "$GITHUB_ENV"
+          echo "PKG=OpenKontor-$V-${{ matrix.name }}" >> "$GITHUB_ENV"
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust-Ziele hinzufügen
+        shell: bash
+        run: |
+          if [ "${{ matrix.target }}" = "universal" ]; then
+            rustup target add aarch64-apple-darwin x86_64-apple-darwin
+          else
+            rustup target add ${{ matrix.target }}
+          fi
+
+      - name: Bibliotheken für das Fenster (Linux)
+        if: runner.os == 'Linux' && !matrix.zig
+        run: sudo apt-get update && sudo apt-get install -y libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev
+
+      - name: Zig für den ARM-Linux-Build
+        if: matrix.zig
+        run: |
+          pip install ziglang==0.13.0
+          cargo install --locked cargo-zigbuild
+
+      - name: Clang für Windows auf ARM
+        if: matrix.target == 'aarch64-pc-windows-msvc'
+        shell: bash
+        run: echo "C:\\Program Files\\LLVM\\bin" >> "$GITHUB_PATH"
+
+      - name: Bauen
+        shell: bash
+        run: |
+          set -e
+          if [ "${{ matrix.target }}" = "universal" ]; then
+            for t in aarch64-apple-darwin x86_64-apple-darwin; do
+              cargo build --locked --release --target $t
+            done
+          elif [ "${{ matrix.zig }}" = "true" ]; then
+            cargo zigbuild --locked --release --target ${{ matrix.target }}.2.28
+          else
+            cargo build --locked --release --target ${{ matrix.target }}
+          fi
+
+      - name: Paket schnüren
+        shell: bash
+        run: |
+          set -e
+          mkdir -p "dist/$PKG"
+          cp README.md LICENSE SERVER-INSTALLATION.md "dist/$PKG/"
+          cp -r deploy "dist/$PKG/"
+          cp -r assets/fonts/LICENSE-LiberationSans.txt assets/icc/LICENSE-sRGB.txt "dist/$PKG/"
+          case "${{ matrix.target }}" in
+            *windows*)
+              cp target/${{ matrix.target }}/release/openkontor.exe target/${{ matrix.target }}/release/openkontor-server.exe "dist/$PKG/"
+              (cd dist && 7z a -tzip "$PKG.zip" "$PKG" > /dev/null)
+              ;;
+            universal)
+              APP="dist/$PKG/OpenKontor.app"
+              mkdir -p "$APP/Contents/MacOS"
+              lipo -create -output "$APP/Contents/MacOS/openkontor" \
+                target/aarch64-apple-darwin/release/openkontor target/x86_64-apple-darwin/release/openkontor
+              lipo -create -output "dist/$PKG/openkontor-server" \
+                target/aarch64-apple-darwin/release/openkontor-server target/x86_64-apple-darwin/release/openkontor-server
+              cat > "$APP/Contents/Info.plist" <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+            <key>CFBundleName</key><string>OpenKontor</string>
+            <key>CFBundleDisplayName</key><string>OpenKontor</string>
+            <key>CFBundleIdentifier</key><string>io.github.johmarjac.openkontor</string>
+            <key>CFBundleVersion</key><string>$VERSION</string>
+            <key>CFBundleShortVersionString</key><string>$VERSION</string>
+            <key>CFBundleExecutable</key><string>openkontor</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>LSMinimumSystemVersion</key><string>11.0</string>
+            <key>NSHighResolutionCapable</key><true/>
+          </dict></plist>
+          PLIST
+              # Apple-Rechner führen nur signierte Programme aus; ohne Entwicklerkonto genügt die Ad-hoc-Signatur.
+              codesign --force --deep --sign - "$APP"
+              codesign --force --sign - "dist/$PKG/openkontor-server"
+              (cd dist && ditto -c -k --keepParent "$PKG" "$PKG.zip")
+              ;;
+            *)
+              if [ "${{ matrix.zig }}" = "true" ]; then DIR=target/${{ matrix.target }}/release; else DIR=target/${{ matrix.target }}/release; fi
+              cp $DIR/openkontor $DIR/openkontor-server "dist/$PKG/"
+              chmod +x "dist/$PKG/openkontor" "dist/$PKG/openkontor-server"
+              (cd dist && tar czf "$PKG.tar.gz" "$PKG")
+              # The server on its own, for the Docker image.
+              mkdir -p server && cp $DIR/openkontor-server server/
+              ;;
+          esac
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: |
+            dist/*.zip
+            dist/*.tar.gz
+            server/openkontor-server
+          if-no-files-found: error
+
+  release:
+    needs: build
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Versionsnummer
+        run: |
+          if [ -n "${{ github.event.inputs.version }}" ]; then V="${{ github.event.inputs.version }}"; else V="${GITHUB_REF_NAME#v}"; fi
+          echo "VERSION=$V" >> "$GITHUB_ENV"
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Dateien und Prüfsummen
+        run: |
+          mkdir -p upload
+          find artifacts \( -name '*.zip' -o -name '*.tar.gz' \) -exec cp {} upload/ \;
+          (cd upload && sha256sum * > SHA256SUMS.txt)
+          ls -la upload
+          sed "s/{VERSION}/$VERSION/g" .github/release-notes.md > notes.md
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ env.VERSION }}
+          name: OpenKontor ${{ env.VERSION }}
+          body_path: notes.md
+          files: upload/*
+
+  docker:
+    needs: build
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Versionsnummer
+        run: |
+          if [ -n "${{ github.event.inputs.version }}" ]; then V="${{ github.event.inputs.version }}"; else V="${GITHUB_REF_NAME#v}"; fi
+          echo "VERSION=$V" >> "$GITHUB_ENV"
+          echo "IMAGE=ghcr.io/$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')/openkontor-server" >> "$GITHUB_ENV"
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Server-Programme bereitlegen
+        run: |
+          PLATFORMS=""
+          for pair in "linux-x64:amd64" "linux-arm64:arm64"; do
+            name=${pair%%:*}; arch=${pair##*:}
+            if [ -f "artifacts/$name/server/openkontor-server" ]; then
+              mkdir -p "bin/$arch" && cp "artifacts/$name/server/openkontor-server" "bin/$arch/"
+              chmod +x "bin/$arch/openkontor-server"
+              PLATFORMS="$PLATFORMS,linux/$arch"
+            fi
+          done
+          echo "PLATFORMS=${PLATFORMS#,}" >> "$GITHUB_ENV"
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/Dockerfile.release
+          platforms: ${{ env.PLATFORMS }}
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:${{ env.VERSION }}
+            ${{ env.IMAGE }}:latest

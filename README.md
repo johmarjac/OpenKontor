@@ -13,7 +13,11 @@ mit beliebig vielen Arbeitsplätzen, oder als Einzelplatz.
 > Haufe-Lexware; „Lexware“ ist eine Marke ihres Inhabers und wird hier nur zum Vergleich genannt.
 > Die Software ersetzt keine Steuerberatung – bitte Auswertungen vor der Abgabe prüfen.
 
-**Schnellstart:** [Rust](https://rustup.rs) installieren, dann im Projektordner
+**Herunterladen:** fertige Programme für Windows (x64 und ARM), macOS (Apple Silicon und
+Intel), Linux (x64 und ARM) sowie ein Docker-Image für den Server gibt es unter
+[Releases](https://github.com/johmarjac/OpenKontor/releases).
+
+**Selbst bauen:** [Rust](https://rustup.rs) installieren, dann im Projektordner
 
     cargo run --release                  # Arbeitsplatz öffnen (Demo, Einzelplatz oder Server)
     cargo run --release -- --server      # Server im selben Programm, ohne Fenster
@@ -186,3 +190,12 @@ geänderten Quelltext ebenfalls unter dieser Lizenz zur Verfügung stellen.
 Mitgelieferte Fremdbestandteile: Schrift Liberation Sans (SIL Open Font License 1.1),
 sRGB-Farbprofil (CC0). Die verwendeten Rust-Bibliotheken stehen unter MIT- bzw.
 Apache-2.0-ähnlichen Lizenzen.
+
+## Neue Version veröffentlichen
+
+Auf GitHub unter **Actions → „Release erstellen“ → „Run workflow“** die Versionsnummer
+eingeben (z. B. `0.2.0`). Alternativ ein Tag setzen: `git tag v0.2.0 && git push origin v0.2.0`.
+
+GitHub baut dann alle Pakete (Windows x64/ARM, macOS Universal, Linux x64/ARM), legt die
+Release-Seite mit Prüfsummen an und veröffentlicht das Docker-Image
+`ghcr.io/johmarjac/openkontor-server`.

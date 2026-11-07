@@ -1,0 +1,13 @@
+# Docker image for releases: uses the server programs already built by the release
+# workflow (bin/amd64, bin/arm64) instead of compiling inside the container.
+FROM debian:bookworm-slim
+ARG TARGETARCH
+# Text recognition for scanned receipts and photos.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        tesseract-ocr tesseract-ocr-deu poppler-utils ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+RUN useradd --system --home /data --create-home openkontor
+COPY bin/${TARGETARCH}/openkontor-server /usr/local/bin/openkontor-server
+USER openkontor
+EXPOSE 8470
+ENTRYPOINT ["openkontor-server", "--data", "/data"]
