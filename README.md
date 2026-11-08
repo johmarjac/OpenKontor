@@ -206,6 +206,22 @@ selbst prüfen kann:
   eine Store-App bräuchte Entwicklerkonten bei Apple und Google.
 - **Automatische Installation von Updates:** Das Programm meldet neue Versionen und öffnet
   die Download-Seite; installiert wird mit dem Installer bzw. Paket.
+- **Signierte Programme:** Windows und macOS warnen beim ersten Start, weil die Programme
+  nicht mit einem kostenpflichtigen Zertifikat signiert sind (Windows ca. 200–400 € im Jahr,
+  Apple-Entwicklerkonto 99 $ im Jahr).
+
+Machbar, aber noch nicht eingebaut (nach Nutzen für den Umstieg und den Alltag):
+
+1. **Datenübernahme:** Kontakte, Artikel und offene Posten aus Lexware oder anderen
+   Programmen per CSV einlesen – wichtig für den Umstieg.
+2. **SEPA:** Lieferantenrechnungen als Sammelüberweisung (pain.001) ans Online-Banking
+   geben, Kunden per Lastschrift einziehen (pain.008, mit Mandatsverwaltung).
+3. **Mahnlauf:** alle überfälligen Rechnungen auf einmal mahnen (heute einzeln je Rechnung).
+4. **Liquiditätsvorschau:** Kontostand der nächsten Wochen aus offenen Rechnungen,
+   Eingangsbelegen und wiederkehrenden Zahlungen.
+5. **Projekte und Zeiterfassung:** Stunden erfassen und in Rechnungen übernehmen.
+6. **Revisionssichere Ablage:** Belege im S3-Speicher zusätzlich gegen Löschen sperren
+   (Object Lock).
 
 **Bitte vor dem Echtbetrieb mit der Steuerberatung abstimmen:** Kontenzuordnung SKR 03/04
 im DATEV-Export, Steuerschlüssel, Bilanzgliederung und die Vorlage der
@@ -215,8 +231,8 @@ Verfahrensdokumentation. Die Rechenregeln sind getestet, ersetzen aber keine Fac
 (Tesseract), echte Mail-Anbieter beim Versand und beim Sammelpostfach (auch die
 Microsoft-365-Anmeldung als App), Anmeldung bei einem echten Microsoft-365-Mandanten,
 DATEV-Import beim Steuerberater, GoBD-Export in einer Prüfsoftware (IDEA), Kontoauszüge
-verschiedener Banken, die Installationspakete (Windows-Installer, DMG, .deb), das
-Linux-Installationsskript, das Docker-Image und Windows.
+verschiedener Banken, die Belegablage in S3, FTP/FTPS und SFTP, die Installationspakete
+(Windows-Installer, DMG, .deb), das Linux-Installationsskript, das Docker-Image und Windows.
 
 ## Lizenz
 
