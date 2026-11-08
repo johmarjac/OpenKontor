@@ -33,9 +33,11 @@ impl App {
                 .map(|t| t.hours)
                 .sum()
         };
-        ui.horizontal(|ui| {
+        toolbar(ui, "projects", |ui, side| match side {
+            Side::Left => {
             ui.checkbox(&mut self.projects.show_inactive, t("Beendete anzeigen"));
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            }
+            Side::Right => {
                 if primary(ui, t("+ Projekt")).clicked() {
                     self.projects.edit = Some(Project::default());
                 }
@@ -43,58 +45,76 @@ impl App {
                     let project_id = self.projects.selected.or(self.data.projects.iter().find(|p| p.active).map(|p| p.id)).unwrap_or(0);
                     self.projects.entry = Some(TimeEntry { project_id, user: self.user_name(), date: self.today, ..TimeEntry::default() });
                 }
-            });
+            }
         });
         ui.add_space(8.0);
         let list: Vec<Project> = self.data.projects.iter().filter(|p| p.active || self.projects.show_inactive).cloned().collect();
         if self.projects.selected.is_none() {
             self.projects.selected = list.first().map(|p| p.id);
         }
-        let left = (ui.available_width() * 0.42).max(360.0);
         let mut pick = None;
         let mut edit = None;
-        ui.horizontal_top(|ui| {
-            ui.vertical(|ui| {
-                ui.set_width(left);
-                card(ui, |ui| {
-                    ui.set_width(left - 34.0);
-                    table_header(ui, &PROJECT_COLS);
-                    ScrollArea::vertical().id_salt("projects").auto_shrink(false).max_height(ui.available_height() - 20.0).show(ui, |ui| {
-                        if list.is_empty() {
-                            empty_hint(ui, t("Noch keine Projekte. Legen Sie ein Projekt an und erfassen Sie Ihre Stunden – abgerechnet wird mit einem Klick."));
+        let customers: Vec<String> = list.iter().map(|p| self.data.contact_name(p.contact_id)).collect();
+        let current = self.projects.selected;
+        let mut list_card = |ui: &mut Ui, width: f32, height: f32| {
+            card(ui, |ui| {
+                ui.set_width(width - 34.0);
+                table_header(ui, &PROJECT_COLS);
+                ScrollArea::vertical().id_salt("projects").auto_shrink(false).max_height(height).show(ui, |ui| {
+                    if list.is_empty() {
+                        empty_hint(ui, t("Noch keine Projekte. Legen Sie ein Projekt an und erfassen Sie Ihre Stunden – abgerechnet wird mit einem Klick."));
+                    }
+                    for (p, customer) in list.iter().zip(&customers) {
+                        let (all, open) = (hours(p.id, None), hours(p.id, Some(false)));
+                        let budget = if p.budget_hours > 0.0 {
+                            let pct = all / p.budget_hours * 100.0;
+                            Cell::MutedColored(format!("{:.0} %", pct), if pct > 100.0 { RED } else if pct > 80.0 { ORANGE } else { MUTED })
+                        } else {
+                            Cell::Muted("–".into())
+                        };
+                        let cells = [
+                            Cell::B(if p.active { p.name.clone() } else { tf!("{} (beendet)", p.name) }),
+                            Cell::T(customer.clone()),
+                            Cell::T(fmt_qty(all)),
+                            if open > 0.0 { Cell::MutedColored(fmt_qty(open), ACCENT) } else { Cell::Muted("0".into()) },
+                            budget,
+                        ];
+                        let r = table_row(ui, &PROJECT_COLS, &cells, current == Some(p.id));
+                        if r.double_clicked() {
+                            edit = Some(p.clone());
+                        } else if r.clicked() {
+                            pick = Some(p.id);
                         }
-                        for p in &list {
-                            let (all, open) = (hours(p.id, None), hours(p.id, Some(false)));
-                            let budget = if p.budget_hours > 0.0 {
-                                let pct = all / p.budget_hours * 100.0;
-                                Cell::MutedColored(format!("{:.0} %", pct), if pct > 100.0 { RED } else if pct > 80.0 { ORANGE } else { MUTED })
-                            } else {
-                                Cell::Muted("–".into())
-                            };
-                            let cells = [
-                                Cell::B(if p.active { p.name.clone() } else { tf!("{} (beendet)", p.name) }),
-                                Cell::T(self.data.contact_name(p.contact_id)),
-                                Cell::T(fmt_qty(all)),
-                                if open > 0.0 { Cell::MutedColored(fmt_qty(open), ACCENT) } else { Cell::Muted("0".into()) },
-                                budget,
-                            ];
-                            let r = table_row(ui, &PROJECT_COLS, &cells, self.projects.selected == Some(p.id));
-                            if r.double_clicked() {
-                                edit = Some(p.clone());
-                            } else if r.clicked() {
-                                pick = Some(p.id);
-                            }
-                        }
-                    });
+                    }
                 });
             });
-            ui.add_space(14.0);
-            ui.vertical(|ui| {
-                if let Some(p) = self.projects.selected.and_then(|id| self.data.projects.iter().find(|p| p.id == id)).cloned() {
-                    self.project_detail(ui, &p);
-                }
+        };
+        let selected = self.projects.selected.and_then(|id| self.data.projects.iter().find(|p| p.id == id)).cloned();
+        let total = ui.available_width();
+        if total >= 950.0 {
+            // Wide: projects on the left, the chosen project's times on the right.
+            let left = (total * 0.4).clamp(360.0, 520.0);
+            ui.horizontal_top(|ui| {
+                ui.vertical(|ui| {
+                    ui.set_width(left);
+                    let h = ui.available_height() - 20.0;
+                    list_card(ui, left, h);
+                });
+                ui.add_space(14.0);
+                ui.vertical(|ui| {
+                    if let Some(p) = &selected {
+                        self.project_detail(ui, p);
+                    }
+                });
             });
-        });
+        } else {
+            // Narrow: one below the other.
+            list_card(ui, total, 150.0);
+            ui.add_space(12.0);
+            if let Some(p) = &selected {
+                self.project_detail(ui, p);
+            }
+        }
         if let Some(id) = pick {
             self.projects.selected = Some(id);
             self.projects.ticked.clear();

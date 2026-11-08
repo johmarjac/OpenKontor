@@ -323,33 +323,36 @@ impl App {
             let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), h), egui::Sense::hover());
             let p = ui.painter();
             let max = weeks.iter().map(|w| w.balance.abs()).max().unwrap_or(1).max(1) as f32;
-            let zero = rect.center().y;
+            // Without negative weeks the zero line sits at the bottom.
+            let negative = weeks.iter().any(|w| w.balance < 0);
+            let zero = if negative { rect.center().y } else { rect.bottom() - 4.0 };
             p.line_segment([egui::pos2(rect.left(), zero), egui::pos2(rect.right(), zero)], Stroke::new(1.0, BORDER));
             let bw = rect.width() / weeks.len().max(1) as f32;
             for (i, w) in weeks.iter().enumerate() {
                 let x = rect.left() + i as f32 * bw;
-                let len = w.balance as f32 / max * (h / 2.0 - 6.0);
+                let len = w.balance as f32 / max * if negative { h / 2.0 - 6.0 } else { h - 12.0 };
                 let bar = egui::Rect::from_two_pos(egui::pos2(x + bw * 0.2, zero), egui::pos2(x + bw * 0.8, zero - len));
                 p.rect_filled(bar, CornerRadius::same(2), if w.balance >= 0 { INCOME } else { RED });
             }
             ui.add_space(8.0);
-            egui::Grid::new("forecast").num_columns(5).spacing([24.0, 5.0]).striped(true).show(ui, |ui| {
-                for h in ["Woche ab", "Eingänge", "Ausgänge", "Kontostand", "Größte Posten"] {
-                    ui.label(muted(t(h)));
-                }
-                ui.end_row();
-                for w in &weeks {
-                    ui.label(fmt_date(w.start));
-                    right_label(ui, 110.0, RichText::new(fmt_money(w.inflow)).color(GREEN));
-                    right_label(ui, 110.0, RichText::new(fmt_money(-w.outflow)).color(RED));
-                    right_label(ui, 120.0, RichText::new(fmt_money(w.balance)).strong().color(if w.balance < 0 { RED } else { TEXT }));
-                    let mut items = w.items.clone();
-                    items.sort_by_key(|(_, a)| -a.abs());
-                    let text: Vec<String> = items.iter().take(2).map(|(t, a)| format!("{} {}", tr(t), fmt_money(*a))).collect();
-                    ui.label(muted(text.join(" · ")));
-                    ui.end_row();
-                }
-            });
+            const COLS: [Col; 5] =
+                [col("Woche ab", 0.9), rcol("Eingänge", 1.0), rcol("Ausgänge", 1.0), rcol("Kontostand", 1.1), col("Größte Posten", 3.2)];
+            table_header(ui, &COLS);
+            for w in &weeks {
+                let mut items = w.items.clone();
+                items.sort_by_key(|(_, a)| -a.abs());
+                let text: Vec<String> = items.iter().take(2).map(|(t, a)| format!("{} {}", tr(t), fmt_money(*a))).collect();
+                let cells = [
+                    Cell::T(fmt_date(w.start)),
+                    Cell::MoneyColored(w.inflow, GREEN),
+                    Cell::MoneyColored(-w.outflow, RED),
+                    Cell::MoneyColored(w.balance, if w.balance < 0 { RED } else { TEXT }),
+                    Cell::Muted(text.join(" · ")),
+                ];
+                table_row(ui, &COLS, &cells, false).on_hover_text(
+                    w.items.iter().map(|(t, a)| format!("{} {}", tr(t), fmt_money(*a))).collect::<Vec<_>>().join("\n"),
+                );
+            }
             if let Some(w) = weeks.iter().find(|w| w.balance < 0) {
                 ui.add_space(6.0);
                 ui.label(RichText::new(tf!("Achtung: In der Woche ab {} reicht das Geld voraussichtlich nicht.", fmt_date(w.start))).color(RED));

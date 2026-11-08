@@ -186,18 +186,20 @@ impl App {
             y.reverse();
             y
         };
-        ui.horizontal(|ui| {
+        toolbar(ui, "assets", |ui, side| match side {
+            Side::Left => {
             egui::ComboBox::from_id_salt("asset_year").selected_text(year.to_string()).width(80.0).show_ui(ui, |ui| {
                 for y in &years {
                     ui.selectable_value(&mut self.books.asset_year, *y, y.to_string());
                 }
             });
             ui.label(muted(t("Anlagenverzeichnis mit Abschreibung (AfA) des Jahres")));
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            }
+            Side::Right => {
                 if primary(ui, t("+ Anlagegut")).clicked() {
                     self.books.asset_edit = Some(Asset::default());
                 }
-            });
+            }
         });
         ui.add_space(8.0);
         let list: Vec<Asset> = self.data.assets.iter().filter(|a| a.date.year() <= year).cloned().collect();
@@ -351,13 +353,15 @@ impl App {
 
     fn journal(&mut self, ui: &mut Ui) {
         let chart = self.data.company.chart;
-        ui.horizontal(|ui| {
+        toolbar(ui, "journal", |ui, side| match side {
+            Side::Left => {
             ui.label(muted(t("Manuelle Buchungen Soll an Haben, z. B. Eröffnungsbilanz (gegen 9000 Saldenvorträge), Abgrenzungen oder Korrekturen.")));
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            }
+            Side::Right => {
                 if primary(ui, t("+ Umbuchung")).clicked() {
                     self.books.journal_edit = Some(JournalEntry { date: self.today, ..JournalEntry::default() });
                 }
-            });
+            }
         });
         if self.data.company.accounting == Accounting::Euer {
             ui.label(RichText::new(t("Ihre Firma ermittelt den Gewinn per Einnahmen-Überschuss-Rechnung. Umbuchungen wirken nur auf GuV und Bilanz (Einstellungen → Buchhaltung).")).color(ORANGE));

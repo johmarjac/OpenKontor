@@ -14,7 +14,7 @@ pub struct SecurityState {
 
 impl App {
     pub(super) fn settings(&mut self, ui: &mut Ui) {
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.selectable_value(&mut self.settings_tab, SettingsTab::Firma, t("Firma & Belege"));
             ui.selectable_value(&mut self.settings_tab, SettingsTab::Buchhaltung, t("Buchhaltung"));
             ui.selectable_value(&mut self.settings_tab, SettingsTab::Benutzer, t("Benutzer & Passwort"));
@@ -54,6 +54,8 @@ impl App {
             ui.label(muted(t("Erscheinen im Kopf und in der Fußzeile Ihrer Angebote und Rechnungen.")));
             ui.add_space(4.0);
             ui.add_enabled_ui(can, |ui| {
+                // The fields share the width left next to the labels.
+                let field = fit(ui, 290.0, 300.0, 640.0) / 2.0;
                 egui::Grid::new("company")
                     .num_columns(4)
                     .spacing([14.0, 8.0])
@@ -67,13 +69,13 @@ impl App {
                         ];
                         for (l1, v1, l2, v2) in pairs {
                             ui.label(muted(t(l1)));
-                            ui.add_sized([320.0, 28.0], TextEdit::singleline(v1));
+                            ui.add_sized([field, 28.0], TextEdit::singleline(v1));
                             ui.label(muted(t(l2)));
-                            ui.add_sized([280.0, 28.0], TextEdit::singleline(v2));
+                            ui.add_sized([field, 28.0], TextEdit::singleline(v2));
                             ui.end_row();
                         }
                         ui.label(muted(t("IBAN")));
-                        ui.add_sized([320.0, 28.0], TextEdit::singleline(&mut c.iban));
+                        ui.add_sized([field, 28.0], TextEdit::singleline(&mut c.iban));
                         ui.end_row();
                     });
                 ui.add_space(8.0);

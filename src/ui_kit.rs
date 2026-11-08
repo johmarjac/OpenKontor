@@ -5,7 +5,7 @@ use crate::i18n::{t, to_german, tr};
 use crate::tf;
 use chrono::NaiveDate;
 use eframe::egui::{
-    self, Align2, Color32, CornerRadius, FontId, Frame, Id, Margin, Rect, Response,
+    self, Align, Align2, Color32, CornerRadius, FontId, Frame, Id, Layout, Margin, Rect, Response,
     RichText, Sense, Stroke, StrokeKind, TextEdit, Ui, Vec2, pos2, vec2,
 };
 
@@ -67,8 +67,9 @@ pub fn card_frame() -> Frame {
         .inner_margin(Margin::same(16))
 }
 
+/// A white card; its content is always left-aligned, also inside centred areas.
 pub fn card<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
-    card_frame().show(ui, add).inner
+    card_frame().show(ui, |ui| ui.with_layout(Layout::top_down(Align::Min), add).inner).inner
 }
 
 pub fn card_title(ui: &mut Ui, text: &str) {
@@ -157,18 +158,71 @@ pub const fn rcol(title: &'static str, weight: f32) -> Col {
     Col { title, weight, right: true }
 }
 
-fn col_rects(rect: Rect, cols: &[Col]) -> Vec<Rect> {
+/// Column widths by weight. Narrow columns (dates, amounts) keep a minimum width so they
+/// stay readable on small windows; the wide text columns give way instead.
+fn col_widths(width: f32, cols: &[Col]) -> Vec<f32> {
     let total: f32 = cols.iter().map(|c| c.weight).sum();
+    let mut w: Vec<f32> = cols.iter().map(|c| width * c.weight / total).collect();
+    let min = (width / cols.len() as f32).min(92.0);
+    let short: f32 = w.iter().map(|x| (min - x).max(0.0)).sum();
+    if short > 0.0 {
+        let spare: f32 = w.iter().map(|x| (x - min).max(0.0)).sum();
+        for x in w.iter_mut() {
+            if *x < min {
+                *x = min;
+            } else if spare > 0.0 {
+                *x -= (*x - min) / spare * short;
+            }
+        }
+    }
+    w
+}
+
+fn col_rects(rect: Rect, cols: &[Col]) -> Vec<Rect> {
     let mut x = rect.left() + 10.0;
     let width = rect.width() - 20.0;
-    cols.iter()
-        .map(|c| {
-            let w = width * c.weight / total;
+    col_widths(width, cols)
+        .into_iter()
+        .map(|w| {
             let r = Rect::from_min_size(pos2(x, rect.top()), vec2(w, rect.height()));
             x += w;
             r.shrink2(vec2(5.0, 0.0))
         })
         .collect()
+}
+
+/// Which part of a toolbar is being drawn.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Side {
+    Left,
+    Right,
+}
+
+/// A toolbar: filters on the left, buttons on the right. When the window is too narrow,
+/// the buttons move to a second line instead of covering the filters.
+pub fn toolbar(ui: &mut Ui, salt: &str, mut add: impl FnMut(&mut Ui, Side)) {
+    let id = Id::unique(("toolbar_width", salt));
+    let need = ui.data(|d| d.get_temp::<f32>(id)).unwrap_or(280.0);
+    ui.horizontal_wrapped(|ui| {
+        add(ui, Side::Left);
+        if ui.available_width() < need + 12.0 {
+            ui.end_row();
+        }
+        let height = ui.spacing().interact_size.y;
+        let used = ui
+            .allocate_ui_with_layout(vec2(ui.available_width(), height), Layout::right_to_left(Align::Center), |ui| {
+                let right = ui.max_rect().right();
+                add(ui, Side::Right);
+                right - ui.min_rect().left()
+            })
+            .inner;
+        ui.data_mut(|d| d.insert_temp(id, used));
+    });
+}
+
+/// A width for an input that fits the space left, between `min` and `max`.
+pub fn fit(ui: &Ui, reserve: f32, min: f32, max: f32) -> f32 {
+    (ui.available_width() - reserve).clamp(min, max)
 }
 
 pub fn table_header(ui: &mut Ui, cols: &[Col]) {

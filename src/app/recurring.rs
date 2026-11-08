@@ -26,9 +26,11 @@ impl App {
         let small = self.data.company.small_business;
         let due = self.data.due_recurring(self.today);
         ui.add_space(4.0);
-        ui.horizontal(|ui| {
+        toolbar(ui, "recurring", |ui, side| match side {
+            Side::Left => {
             ui.label(muted(t("Rechnungen, die regelmäßig neu geschrieben werden (z. B. Wartungsverträge, Mieten). Der Server erstellt fällige Rechnungen jeden Tag selbst.")));
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            }
+            Side::Right => {
                 if due > 0 && primary(ui, &tf!("{} fällige jetzt erstellen", due)).clicked() && self.run(Op::CreateDueRecurring(self.today)).is_ok() {
                     self.info(t("Die Rechnungen wurden erstellt."));
                 }
@@ -36,7 +38,7 @@ impl App {
                     let doc = self.new_doc(DocKind::Rechnung);
                     self.recurring_edit = Some(Recurring { template: doc, ..Recurring::default() });
                 }
-            });
+            }
         });
         ui.add_space(8.0);
         let mut open = None;

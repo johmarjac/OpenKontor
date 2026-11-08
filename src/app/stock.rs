@@ -44,9 +44,11 @@ impl App {
             kpi(ui, w, t("Nachbestellen"), &low.len().to_string(), t("unter Mindestbestand"), if low.is_empty() { GREEN } else { ORANGE });
         });
         ui.add_space(10.0);
-        ui.horizontal(|ui| {
+        toolbar(ui, "stock", |ui, side| match side {
+            Side::Left => {
             ui.label(muted(t("Lieferscheine und Rechnungen buchen Ware aus, erhaltene Bestellungen buchen sie ein.")));
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            }
+            Side::Right => {
                 if !low.is_empty() && primary(ui, t("Bestellung für fehlende Ware")).clicked() {
                     let mut doc = self.new_doc(DocKind::Bestellung);
                     doc.lines = low
@@ -64,7 +66,7 @@ impl App {
                     self.doc_edit = Some(doc);
                     self.section = Section::Belege;
                 }
-            });
+            }
         });
         ui.add_space(8.0);
         let mut clicked = None;

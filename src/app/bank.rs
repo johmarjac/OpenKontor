@@ -71,13 +71,15 @@ impl App {
             kpi(ui, w, t("Ausgänge offen"), &fmt_money(outflow), t("noch keinem Beleg zugeordnet"), EXPENSE);
         });
         ui.add_space(10.0);
-        ui.horizontal(|ui| {
+        toolbar(ui, "bank", |ui, side| match side {
+            Side::Left => {
             ui.selectable_value(&mut self.bank.filter, Some(BankStatus::Offen), t("Offen"));
             ui.selectable_value(&mut self.bank.filter, Some(BankStatus::Zugeordnet), t("Zugeordnet"));
             ui.selectable_value(&mut self.bank.filter, Some(BankStatus::Ignoriert), t("Ignoriert"));
             ui.selectable_value(&mut self.bank.filter, None, t("Alle"));
             ui.add(TextEdit::singleline(&mut self.bank.search).hint_text(t("Name, Zweck, Betrag …")).desired_width(200.0));
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            }
+            Side::Right => {
                 if icon_button(ui, Icon::Download, t("Kontoauszug einlesen …"))
                     .on_hover_text(t("CAMT-Datei (XML) oder CSV aus dem Online-Banking"))
                     .clicked()
@@ -93,7 +95,7 @@ impl App {
                     }
                     self.info(tf!("{} Umsätze zugeordnet.", done));
                 }
-            });
+            }
         });
         ui.add_space(8.0);
         let q = self.bank.search.to_lowercase();

@@ -135,7 +135,8 @@ impl App {
         let count = |s: ReceiptStatus| self.data.receipts.iter().filter(|r| r.status == s).count();
         let (new, booked, discarded) = (count(ReceiptStatus::Neu), count(ReceiptStatus::Gebucht), count(ReceiptStatus::Verworfen));
         let is_remote = matches!(self.backend, Backend::Remote(_));
-        ui.horizontal(|ui| {
+        toolbar(ui, "receipts", |ui, side| match side {
+            Side::Left => {
             let f = &mut self.receipts.filter;
             ui.selectable_value(f, Some(ReceiptStatus::Neu), tf!("Zu prüfen ({})", new));
             ui.selectable_value(f, Some(ReceiptStatus::Gebucht), tf!("Gebucht ({})", booked));
@@ -150,7 +151,8 @@ impl App {
             }
             ui.separator();
             ui.add(TextEdit::singleline(&mut self.receipts.search).hint_text(t("Lieferant, Nummer, Text …")).desired_width(200.0));
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            }
+            Side::Right => {
                 if icon_button(ui, Icon::Inbox, t("Dateien hinzufügen …")).clicked() {
                     self.pick_receipt_files();
                 }
@@ -160,7 +162,7 @@ impl App {
                         Err(e) => self.error(tr(&e)),
                     }
                 }
-            });
+            }
         });
         ui.add_space(8.0);
         let q = self.receipts.search.to_lowercase();
@@ -392,6 +394,8 @@ impl App {
 
         let total_w = ui.available_width();
         let preview_w = (total_w * 0.45).clamp(320.0, 560.0);
+        // On narrow windows the original is not shown beside the form ("Original öffnen" shows it).
+        if total_w >= 960.0 {
         egui::Panel::right("receipt_preview")
             .exact_size(preview_w)
             .resizable(false)
@@ -419,6 +423,7 @@ impl App {
                     });
                 });
             });
+        }
 
         ScrollArea::vertical().id_salt("receipt_form").auto_shrink(false).show(ui, |ui| {
             card(ui, |ui| {

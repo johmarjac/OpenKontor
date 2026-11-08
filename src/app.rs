@@ -388,6 +388,35 @@ impl App {
             if let Some(s) = section {
                 app.section = s;
             }
+            // OPENKONTOR_SHOT_TAB chooses a tab of the section for the picture.
+            if let Ok(tab) = std::env::var("OPENKONTOR_SHOT_TAB") {
+                match tab.as_str() {
+                    "euer" => app.report_tab = ReportTab::Euer,
+                    "anlage" => app.report_tab = ReportTab::AnlageEuer,
+                    "ustva" => app.report_tab = ReportTab::Ustva,
+                    "zm" => app.report_tab = ReportTab::Zm,
+                    "bilanz" => app.report_tab = ReportTab::Bilanz,
+                    "liquiditaet" => app.report_tab = ReportTab::Liquiditaet,
+                    "op" => app.report_tab = ReportTab::OffenePosten,
+                    "kunden" => app.report_tab = ReportTab::Kunden,
+                    "exporte" => app.report_tab = ReportTab::Exporte,
+                    "firma" => app.settings_tab = SettingsTab::Firma,
+                    "buchhaltung" => app.settings_tab = SettingsTab::Buchhaltung,
+                    "benutzer" => app.settings_tab = SettingsTab::Benutzer,
+                    "sicherheit" => app.settings_tab = SettingsTab::Sicherheit,
+                    "mandanten" => app.settings_tab = SettingsTab::Mandanten,
+                    "ablage" => app.settings_tab = SettingsTab::Ablage,
+                    "daten" => app.settings_tab = SettingsTab::Daten,
+                    "sprache" => app.settings_tab = SettingsTab::Sprache,
+                    "email" => app.settings_tab = SettingsTab::Email,
+                    "kasse" => app.books.tab = books::BooksTab::Kasse,
+                    "anlagen" => app.books.tab = books::BooksTab::Anlagen,
+                    "umbuchungen" => app.books.tab = books::BooksTab::Umbuchungen,
+                    "lager" => app.stock.tab = stock::StockTab::Lager,
+                    "wiederkehrend" => app.doc_view_recurring = true,
+                    _ => {}
+                }
+            }
             // OPENKONTOR_SHOT_TILES shows the receipts as thumbnails.
             app.cfg.receipt_tiles = std::env::var("OPENKONTOR_SHOT_TILES").is_ok();
             // OPENKONTOR_SHOT_DOC=beleg opens the newest receipt of the inbox.
@@ -397,7 +426,10 @@ impl App {
             {
                 app.open_receipt(id);
             }
-            if app.section == Section::Belege {
+            if app.section == Section::Belege
+                && !app.doc_view_recurring
+                && std::env::var("OPENKONTOR_SHOT_DOC").map_or(true, |v| v != "liste")
+            {
                 let id = app
                     .data
                     .documents
@@ -1520,9 +1552,18 @@ impl App {
                         for d in list.iter().take(6) {
                             let overdue = d.is_overdue(self.today);
                             let r = ui
-                                .horizontal(|ui| {
+                                .vertical(|ui| {
+                                    let amount = fmt_money_cur(crate::i18n::lang(), d.open_amount(small), d.currency());
+                                    ui.horizontal(|ui| {
+                                        let w = ui.available_width() - ui.spacing().item_spacing.x;
+                                        let name_w = (w - 105.0).max(60.0);
+                                        ui.allocate_ui_with_layout(vec2(name_w, 20.0), Layout::left_to_right(Align::Center), |ui| {
+                                            ui.set_min_width(name_w);
+                                            ui.add(egui::Label::new(RichText::new(self.data.contact_name(d.contact_id)).strong()).truncate());
+                                        });
+                                        right_label(ui, 100.0, RichText::new(amount).strong());
+                                    });
                                     ui.vertical(|ui| {
-                                        ui.label(RichText::new(self.data.contact_name(d.contact_id)).strong());
                                         let days = (d.due_date() - self.today).num_days();
                                         let when = if days < 0 {
                                             tf!("{} · seit {} Tagen überfällig", d.number, -days)
@@ -1532,9 +1573,6 @@ impl App {
                                             tf!("{} · fällig in {} Tagen", d.number, days)
                                         };
                                         ui.label(RichText::new(when).size(12.5).color(if overdue { RED } else { MUTED }));
-                                    });
-                                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                        ui.label(RichText::new(fmt_money_cur(crate::i18n::lang(), d.open_amount(small), d.currency())).strong());
                                     });
                                 })
                                 .response

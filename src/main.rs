@@ -50,7 +50,7 @@ fn main() -> eframe::Result {
         println!("  openkontor                                  Arbeitsplatz öffnen");
         println!("  openkontor --server [--db URL] [--port 8470] [--data ORDNER] [--name NAME]");
         println!("                                              Server ohne Fenster starten");
-        println!("  openkontor --screenshot bild.png [--section NAME] [--lang de|en]");
+        println!("  openkontor --screenshot bild.png [--section NAME] [--lang de|en] [--size 1320x840]");
         return Ok(());
     }
 
@@ -68,11 +68,15 @@ fn main() -> eframe::Result {
     });
     let section = value("--section").and_then(|s| app::Section::from_name(&s));
     let lang = value("--lang").map(|s| i18n::Lang::from_code(&s));
+    // --size 1040x680 tries the window at another size (for pictures).
+    let size = value("--size")
+        .and_then(|s| s.split_once('x').and_then(|(w, h)| Some([w.parse::<f32>().ok()?, h.parse::<f32>().ok()?])))
+        .unwrap_or([1320.0, 840.0]);
 
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("OpenKontor – Rechnungen & Buchhaltung")
-            .with_inner_size([1320.0, 840.0])
+            .with_inner_size(size)
             .with_min_inner_size([1040.0, 680.0]),
         ..Default::default()
     };

@@ -43,7 +43,8 @@ impl App {
             self.recurring_list(ui);
             return;
         }
-        ui.horizontal(|ui| {
+        toolbar(ui, "documents", |ui, side| match side {
+            Side::Left => {
             egui::ComboBox::from_id_salt("doc_status")
                 .selected_text(self.doc_status.map(|s| s.label()).unwrap_or(t("Jeder Status")))
                 .show_ui(ui, |ui| {
@@ -64,7 +65,8 @@ impl App {
                     .hint_text(t("Nummer, Kunde …"))
                     .desired_width(200.0),
             );
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            }
+            Side::Right => {
                 ui.menu_button(t("+ Weitere …"), |ui| {
                     for k in [DocKind::Auftragsbestaetigung, DocKind::Lieferschein, DocKind::Gutschrift, DocKind::Bestellung] {
                         if ui.button(k.label()).clicked() {
@@ -79,7 +81,7 @@ impl App {
                 if overdue > 0 && ui.button(tf!("Mahnlauf ({} überfällig) …", overdue)).clicked() {
                     self.open_dunning();
                 }
-            });
+            }
         });
         ui.add_space(8.0);
         let q = self.doc_search.to_lowercase();
@@ -395,22 +397,26 @@ impl App {
             self.doc_edit = Some(doc);
             return;
         }
+        // On narrow windows the paper preview gives way to the form ("PDF anzeigen" shows it).
+        let show_preview = total_w >= 1000.0;
         let preview_w = (total_w * 0.38).clamp(320.0, 470.0);
-        let form_w = total_w - preview_w - 16.0;
+        let form_w = if show_preview { total_w - preview_w - 16.0 } else { total_w };
         let mut switch_to = None;
-        egui::Panel::right("doc_preview_panel")
-            .exact_size(preview_w)
-            .resizable(false)
-            .show_separator_line(false)
-            .frame(Frame::new().inner_margin(Margin { left: 16, ..Margin::ZERO }))
-            .show(ui, |ui| {
-                ScrollArea::vertical()
-                    .id_salt("doc_preview")
-                    .auto_shrink(false)
-                    .show(ui, |ui| {
-                        self.document_preview(ui, &doc, preview_w - 30.0);
-                    });
-            });
+        if show_preview {
+            egui::Panel::right("doc_preview_panel")
+                .exact_size(preview_w)
+                .resizable(false)
+                .show_separator_line(false)
+                .frame(Frame::new().inner_margin(Margin { left: 16, ..Margin::ZERO }))
+                .show(ui, |ui| {
+                    ScrollArea::vertical()
+                        .id_salt("doc_preview")
+                        .auto_shrink(false)
+                        .show(ui, |ui| {
+                            self.document_preview(ui, &doc, preview_w - 30.0);
+                        });
+                });
+        }
         ScrollArea::vertical()
             .id_salt("doc_form")
             .auto_shrink(false)

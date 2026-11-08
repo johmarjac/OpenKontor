@@ -14,7 +14,8 @@ const CONTACT_COLS: [Col; 7] = [
 
 impl App {
     pub(super) fn contacts(&mut self, ui: &mut Ui) {
-        ui.horizontal(|ui| {
+        toolbar(ui, "contacts", |ui, side| match side {
+            Side::Left => {
             ui.add(
                 TextEdit::singleline(&mut self.contact_search)
                     .hint_text(t("Suchen …"))
@@ -23,14 +24,15 @@ impl App {
             ui.selectable_value(&mut self.contact_kind, None, t("Alle"));
             ui.selectable_value(&mut self.contact_kind, Some(ContactKind::Kunde), t("Kunden"));
             ui.selectable_value(&mut self.contact_kind, Some(ContactKind::Lieferant), t("Lieferanten"));
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            }
+            Side::Right => {
                 if primary(ui, t("+ Neuer Kontakt")).clicked() {
                     self.contact_edit = Some(Contact {
                         kind: self.contact_kind.unwrap_or(ContactKind::Kunde),
                         ..Contact::default()
                     });
                 }
-            });
+            }
         });
         ui.add_space(8.0);
         let q = self.contact_search.to_lowercase();
@@ -304,17 +306,19 @@ impl App {
             self.stock_page(ui);
             return;
         }
-        ui.horizontal(|ui| {
+        toolbar(ui, "articles", |ui, side| match side {
+            Side::Left => {
             ui.add(
                 TextEdit::singleline(&mut self.article_search)
                     .hint_text(t("Suchen …"))
                     .desired_width(240.0),
             );
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            }
+            Side::Right => {
                 if primary(ui, t("+ Neuer Artikel")).clicked() {
                     self.article_edit = Some(Article::default());
                 }
-            });
+            }
         });
         ui.add_space(8.0);
         let q = self.article_search.to_lowercase();
@@ -479,7 +483,8 @@ const BOOKING_COLS: [Col; 7] = [
 impl App {
     pub(super) fn bookings(&mut self, ui: &mut Ui) {
         let years = self.years();
-        ui.horizontal(|ui| {
+        toolbar(ui, "bookings", |ui, side| match side {
+            Side::Left => {
             egui::ComboBox::from_id_salt("b_year")
                 .selected_text(self.booking_year.to_string())
                 .width(80.0)
@@ -496,7 +501,8 @@ impl App {
                     .hint_text(t("Text, Partner, Konto …"))
                     .desired_width(200.0),
             );
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            }
+            Side::Right => {
                 if primary(ui, t("+ Ausgabe")).clicked() {
                     self.booking_edit = Some(Booking {
                         date: self.today,
@@ -526,7 +532,7 @@ impl App {
                         }
                     }
                 }
-            });
+            }
         });
         ui.add_space(8.0);
         let q = self.booking_search.to_lowercase();

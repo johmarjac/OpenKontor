@@ -164,61 +164,54 @@ impl App {
                 Accounting::Euer => t("Aus den Buchungen abgeleitet (Ist-Prinzip). Für bilanzierende Firmen unter Einstellungen → Buchhaltung „Bilanz“ wählen."),
             }));
             ui.add_space(8.0);
-            let w = (ui.available_width() - 30.0) / 2.0;
-            ui.horizontal_top(|ui| {
-                ui.vertical(|ui| {
-                    ui.set_width(w);
-                    ui.label(RichText::new(t("Gewinn- und Verlustrechnung")).strong());
-                    egui::Grid::new("guv").num_columns(2).spacing([20.0, 5.0]).striped(true).show(ui, |ui| {
-                        ui.label(RichText::new(t("Erträge")).color(GREEN));
-                        ui.end_row();
-                        for (a, v) in &s.revenue {
-                            ui.label(name(a));
-                            amount_cell(ui, RichText::new(fmt_money(*v)));
-                            ui.end_row();
-                        }
-                        ui.label(RichText::new(t("Aufwendungen")).color(RED));
-                        ui.end_row();
-                        for (a, v) in &s.expenses {
-                            ui.label(name(a));
-                            amount_cell(ui, RichText::new(fmt_money(*v)));
-                            ui.end_row();
-                        }
-                        ui.label(RichText::new(if s.profit >= 0 { t("Jahresüberschuss") } else { t("Jahresfehlbetrag") }).strong());
-                        amount_cell(ui, RichText::new(fmt_money(s.profit)).strong());
-                        ui.end_row();
+            // Rows: (label, amount, kind) – kind 0 = account, 1 = heading, 2 = total.
+            let mut guv: Vec<(String, Option<Cents>, u8)> = vec![(t("Erträge").into(), None, 1)];
+            guv.extend(s.revenue.iter().map(|(a, v)| (name(a), Some(*v), 0)));
+            guv.push((t("Aufwendungen").into(), None, 1));
+            guv.extend(s.expenses.iter().map(|(a, v)| (name(a), Some(*v), 0)));
+            guv.push((if s.profit >= 0 { t("Jahresüberschuss") } else { t("Jahresfehlbetrag") }.into(), Some(s.profit), 2));
+            let mut bil: Vec<(String, Option<Cents>, u8)> = vec![(t("Aktiva").into(), None, 1)];
+            bil.extend(s.assets.iter().map(|(a, v)| (name(a), Some(*v), 0)));
+            bil.push((t("Summe Aktiva").into(), Some(s.total_assets), 2));
+            bil.push((t("Passiva").into(), None, 1));
+            bil.extend(s.equity.iter().chain(&s.liabilities).map(|(a, v)| (name(a), Some(*v), 0)));
+            bil.push((t("Summe Passiva").into(), Some(s.total_liabilities), 2));
+            let show = |ui: &mut Ui, title: &str, rows: &[(String, Option<Cents>, u8)]| {
+                const COLS: [Col; 2] = [col("", 3.0), rcol("", 1.2)];
+                ui.label(RichText::new(title).strong());
+                for (label, amount, kind) in rows {
+                    let cells = match (kind, amount) {
+                        (1, _) => [Cell::MutedColored(label.clone(), ACCENT), Cell::Muted(String::new())],
+                        (2, Some(v)) => [Cell::B(label.clone()), Cell::MoneyColored(*v, TEXT)],
+                        (_, Some(v)) => [Cell::T(label.clone()), Cell::Money(*v)],
+                        _ => [Cell::T(label.clone()), Cell::Muted(String::new())],
+                    };
+                    table_row(ui, &COLS, &cells, false);
+                }
+            };
+            // Side by side on wide windows, one below the other on narrow ones.
+            let total = ui.available_width();
+            if total >= 860.0 {
+                let w = (total - 30.0) / 2.0;
+                ui.horizontal_top(|ui| {
+                    ui.vertical(|ui| {
+                        ui.set_width(w);
+                        show(ui, t("Gewinn- und Verlustrechnung"), &guv);
+                    });
+                    ui.add_space(14.0);
+                    ui.vertical(|ui| {
+                        ui.set_width(w);
+                        show(ui, &tf!("Bilanz zum 31.12.{}", year), &bil);
                     });
                 });
-                ui.vertical(|ui| {
-                    ui.set_width(w);
-                    ui.label(RichText::new(tf!("Bilanz zum 31.12.{}", year)).strong());
-                    egui::Grid::new("bilanz").num_columns(2).spacing([20.0, 5.0]).striped(true).show(ui, |ui| {
-                        ui.label(RichText::new(t("Aktiva")).color(ACCENT));
-                        ui.end_row();
-                        for (a, v) in &s.assets {
-                            ui.label(name(a));
-                            amount_cell(ui, RichText::new(fmt_money(*v)));
-                            ui.end_row();
-                        }
-                        ui.label(RichText::new(t("Summe Aktiva")).strong());
-                        amount_cell(ui, RichText::new(fmt_money(s.total_assets)).strong());
-                        ui.end_row();
-                        ui.label(RichText::new(t("Passiva")).color(ACCENT));
-                        ui.end_row();
-                        for (a, v) in s.equity.iter().chain(&s.liabilities) {
-                            ui.label(name(a));
-                            amount_cell(ui, RichText::new(fmt_money(*v)));
-                            ui.end_row();
-                        }
-                        ui.label(RichText::new(t("Summe Passiva")).strong());
-                        amount_cell(ui, RichText::new(fmt_money(s.total_liabilities)).strong());
-                        ui.end_row();
-                    });
-                    if s.total_assets != s.total_liabilities {
-                        ui.label(RichText::new(t("Aktiva und Passiva weichen ab – bitte Umbuchungen prüfen.")).color(RED));
-                    }
-                });
-            });
+            } else {
+                show(ui, t("Gewinn- und Verlustrechnung"), &guv);
+                ui.add_space(14.0);
+                show(ui, &tf!("Bilanz zum 31.12.{}", year), &bil);
+            }
+            if s.total_assets != s.total_liabilities {
+                ui.label(RichText::new(t("Aktiva und Passiva weichen ab – bitte Umbuchungen prüfen.")).color(RED));
+            }
         });
         if pdf {
             let mut guv = vec![(t("Erträge").to_string(), String::new(), true)];
