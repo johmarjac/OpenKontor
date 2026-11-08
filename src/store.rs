@@ -17,6 +17,8 @@ pub enum Change<'a> {
     Mail,
     /// The shared mailbox settings.
     Inbox,
+    /// Where the receipt files are kept.
+    Files,
     All,
 }
 
@@ -756,7 +758,12 @@ impl PgStore {
         }
         let mail = settings.get("mail").and_then(|s| serde_json::from_str(s).ok()).unwrap_or_default();
         let inbox = settings.get("inbox").and_then(|s| serde_json::from_str(s).ok()).unwrap_or_default();
-        Ok(Stored { data, users, revision, mail, inbox })
+        // Servers from before the choice of storage keep their files in the database.
+        let files = settings
+            .get("files")
+            .and_then(|s| serde_json::from_str(s).ok())
+            .unwrap_or(crate::filestore::FileSettings { kind: crate::filestore::FileKind::Datenbank, ..Default::default() });
+        Ok(Stored { data, users, revision, mail, inbox, files })
     }
 }
 
@@ -820,7 +827,9 @@ impl Store for PgStore {
             Change::Users => Self::write_users(&mut tx, &stored.users)?,
             Change::Mail => Self::write_mail(&mut tx, &stored.mail)?,
             Change::Inbox => Self::put_setting(&mut tx, "inbox", &serde_json::to_string(&stored.inbox).map_err(|e| e.to_string())?)?,
+            Change::Files => Self::put_setting(&mut tx, "files", &serde_json::to_string(&stored.files).map_err(|e| e.to_string())?)?,
             Change::All => {
+                Self::put_setting(&mut tx, "files", &serde_json::to_string(&stored.files).map_err(|e| e.to_string())?)?;
                 Self::write_data(&mut tx, &empty, &stored.data, stored.revision)?;
                 Self::write_users(&mut tx, &stored.users)?;
                 Self::write_mail(&mut tx, &stored.mail)?;
@@ -862,7 +871,7 @@ mod tests {
         data.company.logo = Some(crate::pdf::make_logo(1, 1, &[1, 2, 3]));
         data.company.chart = Chart::Skr04;
         let user = User { name: "a".into(), role: crate::server::Role::Vertrieb, totp: "ABC".into(), ..User::default() };
-        let stored = Stored { data: data.clone(), users: vec![user], revision: 7, mail: Default::default(), inbox: Default::default() };
+        let stored = Stored { data: data.clone(), users: vec![user], revision: 7, mail: Default::default(), inbox: Default::default(), files: Default::default() };
         let schema = format!("ok_rt_{}", std::process::id());
         let mut store = PgStore::connect_in(&url, Some(schema.clone())).unwrap();
         store.save(&stored, Change::All).unwrap();

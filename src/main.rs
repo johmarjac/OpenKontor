@@ -14,6 +14,7 @@ mod bank;
 mod einvoice;
 mod export;
 mod exports;
+mod filestore;
 mod i18n;
 mod icons;
 mod imap;

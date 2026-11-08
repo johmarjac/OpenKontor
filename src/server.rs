@@ -109,6 +109,8 @@ pub struct Stored {
     pub mail: crate::mail::MailSettings,
     /// Shared mailbox for incoming receipts; stays on the server (contains the password).
     pub inbox: crate::imap::InboxSettings,
+    /// Where the original receipt files are kept; stays on the server (contains secrets).
+    pub files: crate::filestore::FileSettings,
 }
 
 // ---- Messages between workplace and server --------------------------------
@@ -314,6 +316,8 @@ struct Tenant {
     inbox_shared: Arc<Mutex<crate::imap::InboxSettings>>,
     inbox_now: Arc<AtomicBool>,
     inbox_rx: std::sync::mpsc::Receiver<InboxResult>,
+    /// The storage for receipt files; `None` keeps them in the database.
+    files: Option<Box<dyn crate::filestore::FileBackend>>,
 }
 
 impl Tenant {
@@ -348,6 +352,36 @@ impl Tenant {
             return Err(format!("Speichern fehlgeschlagen: {e}"));
         }
         Ok(())
+    }
+
+    /// Where a receipt's file lies in the storage.
+    fn file_key(&self, id: u64) -> Option<String> {
+        self.stored.data.receipts.iter().find(|r| r.id == id).map(|r| crate::filestore::key_for(id, &r.file_name, &r.received))
+    }
+
+    fn put_file(&mut self, id: u64, key: &str, bytes: &[u8]) -> Result<(), String> {
+        match &mut self.files {
+            Some(b) => b.put(key, bytes).map_err(|e| format!("Belegablage: {e}")),
+            None => self.store.save_file(id, bytes),
+        }
+    }
+
+    /// The original file of a receipt; files stored before a change of storage are still found.
+    fn get_file(&mut self, id: u64) -> Result<Vec<u8>, String> {
+        let key = self.file_key(id).ok_or("Beleg nicht gefunden.")?;
+        if let Some(b) = &mut self.files
+            && let Ok(bytes) = b.get(&key)
+        {
+            return Ok(bytes);
+        }
+        self.store.load_file(id)
+    }
+
+    fn delete_file(&mut self, id: u64, key: &str) {
+        if let Some(b) = &mut self.files {
+            let _ = b.delete(key);
+        }
+        let _ = self.store.delete_file(id);
     }
 
     fn op_reply(&self, id: Option<u64>) -> Reply {
@@ -413,7 +447,11 @@ fn open_tenant(base: &Path, database: Option<&str>, id: &str, first_user: User) 
         revision: 1,
         mail: Default::default(),
         inbox: Default::default(),
+        files: Default::default(),
     });
+    // A broken storage setting must not lose uploads: then the folder next to the data is used.
+    let files = crate::filestore::open(&stored.files, &dir)
+        .unwrap_or_else(|_| crate::filestore::open(&Default::default(), &dir).ok().flatten());
     let mut t = Tenant {
         id: id.to_string(),
         stored,
@@ -424,6 +462,7 @@ fn open_tenant(base: &Path, database: Option<&str>, id: &str, first_user: User) 
         inbox_shared: Default::default(),
         inbox_now: Default::default(),
         inbox_rx: std::sync::mpsc::channel().1,
+        files,
     };
     if is_new {
         t.save(Change::All)?;
@@ -517,6 +556,10 @@ pub fn run(cfg: ServerConfig, on_ready: impl FnOnce(Result<String, String>)) {
         cfg.port,
         state.tenants[0].store.describe()
     );
+    msg.push_str(&format!(
+        "\nBelegablage: {}",
+        state.tenants[0].files.as_ref().map(|b| b.describe()).unwrap_or_else(|| "in der Datenbank".into())
+    ));
     if state.tenants.len() > 1 {
         msg.push_str(&format!("\nMandanten: {}", state.tenants.iter().map(|t| t.name()).collect::<Vec<_>>().join(", ")));
     }
@@ -637,7 +680,8 @@ fn store_receipt(t: &mut Tenant, name: &str, bytes: &[u8], source: &str, user: &
     let receipt = crate::inbox::new_receipt(&t.stored.data, name, bytes, source);
     let mut copy = t.stored.data.clone();
     let id = copy.apply(Op::AddReceipt(Box::new(receipt)), user)?.ok_or("Beleg konnte nicht angelegt werden.")?;
-    t.store.save_file(id, bytes)?;
+    let key = copy.receipts.iter().find(|r| r.id == id).map(|r| crate::filestore::key_for(id, &r.file_name, &r.received)).unwrap_or_default();
+    t.put_file(id, &key, bytes)?;
     t.commit(copy)?;
     Ok(id)
 }

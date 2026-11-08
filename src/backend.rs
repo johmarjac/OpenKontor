@@ -33,6 +33,8 @@ pub struct ClientConfig {
     pub resume: Resume,
     /// Token the server gave for signing in again (not the password).
     pub remember_token: String,
+    /// The receipt inbox shows thumbnails instead of the list.
+    pub receipt_tiles: bool,
 }
 
 /// What was open when the program was closed.
@@ -56,6 +58,7 @@ impl Default for ClientConfig {
             remember: true,
             resume: Resume::Nothing,
             remember_token: String::new(),
+            receipt_tiles: false,
         }
     }
 }
@@ -358,6 +361,39 @@ impl Remote {
                 .header("Authorization", self.auth())
                 .send_json(serde_json::json!({ "name": name })),
         )
+    }
+
+    /// Where the receipt files are kept: settings without secrets, whether a secret is stored,
+    /// and the default folder.
+    pub fn file_settings(&self) -> Result<(crate::filestore::FileSettings, bool, String), String> {
+        #[derive(Deserialize)]
+        struct Reply {
+            settings: crate::filestore::FileSettings,
+            secret_set: bool,
+            default_dir: String,
+        }
+        let r: Reply = read(self.agent.get(format!("{}/api/files/settings", self.base)).header("Authorization", self.auth()).call())?;
+        Ok((r.settings, r.secret_set, r.default_dir))
+    }
+
+    /// Tests or saves the storage; `copy` brings the files stored so far over.
+    pub fn save_file_settings(&self, settings: &crate::filestore::FileSettings, copy: bool, test_only: bool) -> Result<String, String> {
+        #[derive(Deserialize)]
+        struct Reply {
+            message: String,
+        }
+        // Bringing many files over can take a while.
+        let config = ureq::Agent::config_builder()
+            .timeout_global(Some(Duration::from_secs(1800)))
+            .http_status_as_error(false)
+            .build();
+        let r: Reply = read(
+            ureq::Agent::new_with_config(config)
+                .post(format!("{}/api/files/settings", self.base))
+                .header("Authorization", self.auth())
+                .send_json(serde_json::json!({ "settings": settings, "copy": copy, "test_only": test_only })),
+        )?;
+        Ok(r.message)
     }
 
     pub fn totp_start(&self) -> Result<crate::server::TotpStart, String> {

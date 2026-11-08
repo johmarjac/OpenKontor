@@ -20,6 +20,7 @@ impl App {
             ui.selectable_value(&mut self.settings_tab, SettingsTab::Benutzer, t("Benutzer & Passwort"));
             ui.selectable_value(&mut self.settings_tab, SettingsTab::Sicherheit, t("Sicherheit"));
             ui.selectable_value(&mut self.settings_tab, SettingsTab::Mandanten, t("Mandanten"));
+            ui.selectable_value(&mut self.settings_tab, SettingsTab::Ablage, t("Belegablage"));
             ui.selectable_value(&mut self.settings_tab, SettingsTab::Daten, t("Verbindung & Datensicherung"));
             ui.selectable_value(&mut self.settings_tab, SettingsTab::Email, t("E-Mail"));
             ui.selectable_value(&mut self.settings_tab, SettingsTab::Sprache, t("Sprache"));
@@ -31,6 +32,7 @@ impl App {
             SettingsTab::Benutzer => self.settings_users(ui),
             SettingsTab::Sicherheit => self.settings_security(ui),
             SettingsTab::Mandanten => self.settings_tenants(ui),
+            SettingsTab::Ablage => self.settings_storage(ui),
             SettingsTab::Daten => self.settings_data(ui),
             SettingsTab::Sprache => self.settings_language(ui),
             SettingsTab::Email => self.settings_mail(ui),

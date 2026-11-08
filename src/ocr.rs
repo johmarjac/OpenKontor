@@ -70,6 +70,19 @@ fn pdf_text_builtin(bytes: &[u8]) -> String {
     pdf.extract_text_chunks(&pages).into_iter().filter_map(Result::ok).collect::<Vec<_>>().join("")
 }
 
+/// The first page of a PDF as a small PNG picture, if Poppler is installed.
+pub fn pdf_thumbnail(bytes: &[u8]) -> Option<Vec<u8>> {
+    if !bytes.starts_with(b"%PDF") || !has_program("pdftoppm") {
+        return None;
+    }
+    let scratch = Scratch::new().ok()?;
+    let file = scratch.0.join("beleg.pdf");
+    std::fs::write(&file, bytes).ok()?;
+    let prefix = scratch.0.join("vorschau");
+    run(Command::new("pdftoppm").args(["-r", "40", "-f", "1", "-l", "1", "-singlefile", "-png"]).arg(&file).arg(&prefix))?;
+    std::fs::read(scratch.0.join("vorschau.png")).ok()
+}
+
 /// The text of a receipt and how it was obtained ("Textebene" or "Texterkennung").
 pub fn read_text(name: &str, bytes: &[u8]) -> Result<(String, &'static str), String> {
     let lower = name.to_lowercase();

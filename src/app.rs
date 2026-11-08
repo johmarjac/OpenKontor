@@ -13,6 +13,7 @@ mod settings;
 mod settings_more;
 mod statements;
 mod stock;
+mod storage;
 
 use crate::backend::{Backend, ClientConfig, Remote};
 use crate::export;
@@ -152,6 +153,7 @@ enum SettingsTab {
     Benutzer,
     Sicherheit,
     Mandanten,
+    Ablage,
     Daten,
     Sprache,
     Email,
@@ -255,6 +257,7 @@ pub struct App {
     books: books::BooksState,
     stock: stock::StockState,
     security: settings::SecurityState,
+    storage: storage::StorageState,
 
     shot: Option<Shot>,
     frames: u64,
@@ -340,6 +343,7 @@ impl App {
             books: Default::default(),
             stock: Default::default(),
             security: Default::default(),
+            storage: Default::default(),
             shot,
             frames: 0,
         };
@@ -373,6 +377,8 @@ impl App {
             if let Some(s) = section {
                 app.section = s;
             }
+            // OPENKONTOR_SHOT_TILES shows the receipts as thumbnails.
+            app.cfg.receipt_tiles = std::env::var("OPENKONTOR_SHOT_TILES").is_ok();
             // OPENKONTOR_SHOT_DOC=beleg opens the newest receipt of the inbox.
             if app.section == Section::Belegeingang
                 && std::env::var("OPENKONTOR_SHOT_DOC").is_ok_and(|v| v == "beleg")
@@ -469,8 +475,11 @@ impl App {
     }
 
     fn open_demo(&mut self) {
-        self.cfg.resume = crate::backend::Resume::Nothing;
-        self.cfg.save();
+        // Pictures taken with --screenshot leave the remembered sign-in alone.
+        if self.shot.is_none() {
+            self.cfg.resume = crate::backend::Resume::Nothing;
+            self.cfg.save();
+        }
         self.data = sample_data();
         self.backend = Backend::Demo;
         // Two example supplier invoices for the inbox: an e-invoice and a PDF.

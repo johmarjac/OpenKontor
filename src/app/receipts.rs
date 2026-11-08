@@ -18,7 +18,13 @@ pub struct ReceiptsState {
     pub preview: Option<(u64, Preview)>,
     pub inbox: Option<(InboxSettings, bool)>,
     pub inbox_error: Option<String>,
+    /// Small pictures for the thumbnail view; `None` = no picture (a drawn sheet instead).
+    pub thumbs: std::collections::HashMap<u64, Option<egui::TextureHandle>>,
 }
+
+const TILE_W: f32 = 196.0;
+const TILE_H: f32 = 262.0;
+const PICTURE_H: f32 = 170.0;
 
 const COLS: [Col; 7] = [
     col("Eingang", 1.1),
@@ -135,6 +141,14 @@ impl App {
             ui.selectable_value(f, Some(ReceiptStatus::Gebucht), tf!("Gebucht ({})", booked));
             ui.selectable_value(f, Some(ReceiptStatus::Verworfen), tf!("Nicht relevant ({})", discarded));
             ui.selectable_value(f, None, t("Alle"));
+            ui.separator();
+            let before = self.cfg.receipt_tiles;
+            ui.selectable_value(&mut self.cfg.receipt_tiles, false, t("Liste")).on_hover_text(t("Belege als Tabelle"));
+            ui.selectable_value(&mut self.cfg.receipt_tiles, true, t("Vorschaubilder")).on_hover_text(t("Belege als Kacheln mit Vorschau"));
+            if before != self.cfg.receipt_tiles {
+                self.cfg.save();
+            }
+            ui.separator();
             ui.add(TextEdit::singleline(&mut self.receipts.search).hint_text(t("Lieferant, Nummer, Text …")).desired_width(200.0));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if icon_button(ui, Icon::Inbox, t("Dateien hinzufügen …")).clicked() {
@@ -162,6 +176,11 @@ impl App {
             .collect();
         list.reverse();
         let mut open = None;
+        if self.cfg.receipt_tiles {
+            let list: Vec<Receipt> = list.into_iter().cloned().collect();
+            self.receipt_tiles(ui, &list);
+            return;
+        }
         card(ui, |ui| {
             ui.set_width(ui.available_width());
             table_header(ui, &COLS);
@@ -200,6 +219,88 @@ impl App {
         if let Some(id) = open {
             self.open_receipt(id);
         }
+    }
+
+    /// The thumbnail view: one tile per receipt with a small picture of the original.
+    fn receipt_tiles(&mut self, ui: &mut Ui, list: &[Receipt]) {
+        let ctx = ui.ctx().clone();
+        // Pictures are made a few at a time so the window stays responsive.
+        let mut budget = 2;
+        for r in list {
+            if budget == 0 {
+                ctx.request_repaint();
+                break;
+            }
+            if !self.receipts.thumbs.contains_key(&r.id) {
+                let tex = self.make_thumb(&ctx, r);
+                self.receipts.thumbs.insert(r.id, tex);
+                budget -= 1;
+            }
+        }
+        let mut open = None;
+        ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+            if list.is_empty() {
+                empty_hint(ui, t("Keine Belege in dieser Ansicht."));
+            }
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = vec2(14.0, 14.0);
+                for r in list {
+                    let (rect, resp) = ui.allocate_exact_size(vec2(TILE_W, TILE_H), egui::Sense::click());
+                    let p = ui.painter();
+                    let hovered = resp.hovered();
+                    p.rect_filled(rect, CornerRadius::same(10), CARD);
+                    p.rect_stroke(rect, CornerRadius::same(10), Stroke::new(if hovered { 2.0 } else { 1.0 }, if hovered { ACCENT } else { BORDER }), egui::StrokeKind::Inside);
+                    let pic = egui::Rect::from_min_size(rect.min + vec2(10.0, 10.0), vec2(TILE_W - 20.0, PICTURE_H));
+                    p.rect_filled(pic, CornerRadius::same(6), Color32::from_rgb(0xf5, 0xf7, 0xfa));
+                    match self.receipts.thumbs.get(&r.id) {
+                        Some(Some(tex)) => {
+                            let size = tex.size_vec2();
+                            let scale = (pic.width() / size.x).min(pic.height() / size.y);
+                            let shown = egui::Rect::from_center_size(pic.center(), size * scale);
+                            p.image(tex.id(), shown, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), Color32::WHITE);
+                        }
+                        _ => paint_sheet(p, pic, r),
+                    }
+                    let mut y = pic.bottom() + 10.0;
+                    let title = if r.supplier.is_empty() { r.file_name.clone() } else { r.supplier.clone() };
+                    let clip = p.with_clip_rect(rect.shrink(8.0));
+                    clip.text(egui::pos2(rect.left() + 12.0, y), egui::Align2::LEFT_TOP, title, egui::FontId::proportional(14.0), TEXT);
+                    y += 20.0;
+                    let line2 = [r.number.clone(), r.date.map(fmt_date).unwrap_or_default()].into_iter().filter(|x| !x.is_empty()).collect::<Vec<_>>().join(" · ");
+                    clip.text(egui::pos2(rect.left() + 12.0, y), egui::Align2::LEFT_TOP, line2, egui::FontId::proportional(12.0), MUTED);
+                    y += 22.0;
+                    clip.text(egui::pos2(rect.left() + 12.0, y), egui::Align2::LEFT_TOP, fmt_money(r.gross), egui::FontId::proportional(14.0), TEXT);
+                    let (bg, fg) = chip_colors(t(chip_name(r.status)));
+                    let label = tr(t(chip_name(r.status)));
+                    let galley = p.layout_no_wrap(label, egui::FontId::proportional(11.5), fg);
+                    let chip = egui::Rect::from_min_size(egui::pos2(rect.right() - 12.0 - galley.size().x - 14.0, y - 1.0), galley.size() + vec2(14.0, 6.0));
+                    p.rect_filled(chip, CornerRadius::same(9), bg);
+                    p.galley(chip.min + vec2(7.0, 3.0), galley, fg);
+                    if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                        open = Some(r.id);
+                    }
+                }
+            });
+        });
+        if let Some(id) = open {
+            self.open_receipt(id);
+        }
+    }
+
+    /// A small picture of a receipt: photos directly, PDFs via Poppler when installed.
+    fn make_thumb(&self, ctx: &egui::Context, r: &Receipt) -> Option<egui::TextureHandle> {
+        let lower = r.file_name.to_lowercase();
+        let is_image = [".png", ".jpg", ".jpeg"].iter().any(|x| lower.ends_with(x));
+        let is_pdf = lower.ends_with(".pdf");
+        if !is_image && !is_pdf {
+            return None;
+        }
+        let bytes = self.backend.receipt_file(r.id).ok()?;
+        let png = if is_pdf { crate::ocr::pdf_thumbnail(&bytes)? } else { bytes };
+        let img = image::load_from_memory(&png).ok()?.thumbnail(360, 360).to_rgba8();
+        let size = [img.width() as usize, img.height() as usize];
+        let color = egui::ColorImage::from_rgba_unmultiplied(size, img.as_raw());
+        Some(ctx.load_texture(format!("thumb-{}", r.id), color, Default::default()))
     }
 
     fn load_preview(&mut self, ctx: &egui::Context, r: &Receipt) {
@@ -596,4 +697,28 @@ impl App {
 /// Labels built from string slices that are already German keys.
 fn t_dyn(key: &str) -> String {
     tr(key)
+}
+
+/// A drawn sheet for receipts without a picture: kind of file and the first lines of text.
+fn paint_sheet(p: &egui::Painter, area: egui::Rect, r: &Receipt) {
+    let sheet = egui::Rect::from_center_size(area.center(), vec2(area.height() * 0.72, area.height() - 16.0));
+    p.rect_filled(sheet, CornerRadius::same(3), Color32::WHITE);
+    p.rect_stroke(sheet, CornerRadius::same(3), Stroke::new(1.0, BORDER), egui::StrokeKind::Inside);
+    let lower = r.file_name.to_lowercase();
+    let kind = if lower.ends_with(".xml") || r.recognized_by.contains("XRechnung") || r.recognized_by.contains("ZUGFeRD") {
+        "E-Rechnung"
+    } else if lower.ends_with(".pdf") {
+        "PDF"
+    } else {
+        "Datei"
+    };
+    let badge = egui::Rect::from_min_size(sheet.min + vec2(6.0, 6.0), vec2(sheet.width() - 12.0, 16.0));
+    p.rect_filled(badge, CornerRadius::same(3), if kind == "E-Rechnung" { TEAL } else { ACCENT });
+    p.text(badge.center(), egui::Align2::CENTER_CENTER, t(kind), egui::FontId::proportional(10.0), Color32::WHITE);
+    let clip = p.with_clip_rect(sheet.shrink(5.0));
+    let mut y = badge.bottom() + 6.0;
+    for line in r.text.lines().map(str::trim).filter(|l| !l.is_empty()).take(11) {
+        clip.text(egui::pos2(sheet.left() + 6.0, y), egui::Align2::LEFT_TOP, line, egui::FontId::proportional(7.5), MUTED);
+        y += 10.0;
+    }
 }

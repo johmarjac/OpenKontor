@@ -217,6 +217,24 @@ Passwort Administrator. Bei der Anmeldung erscheint dann eine Auswahl „Firma�
 Gespeichert wird jede weitere Firma in einem eigenen PostgreSQL-Schema (`ok_<name>`) bzw.
 ohne Datenbank im Ordner `Mandanten/<name>` neben `server.json`.
 
+## Belegablage (Originaldateien)
+
+Jeder hochgeladene oder per E-Mail eingegangene Beleg wird als Originaldatei unverändert
+aufbewahrt; sein SHA-256-Fingerabdruck steht beim Beleg. Wo die Dateien liegen, legt ein
+Administrator je Firma unter **Einstellungen → Belegablage** fest:
+
+| Ablage | Hinweise |
+|---|---|
+| Ordner auf dem Server (Standard) | `Belege/<Jahr>/<Nr>-<Dateiname>` neben den Serverdaten oder ein eigener Ordner (z. B. ein NAS-Laufwerk) |
+| In der Datenbank | in PostgreSQL; so verhielten sich Server vor dieser Version |
+| S3-Speicher | AWS, MinIO, Hetzner, Wasabi, IONOS … – Adresse, Region, Bucket, Zugangsschlüssel; „Pfad-Stil“ für MinIO und die meisten Anbieter außer AWS |
+| FTP / FTPS | mit TLS dringend empfohlen |
+| SFTP | nutzt das Programm `sftp` (OpenSSH) des Servers mit einer Schlüsseldatei ohne Passwort |
+
+„Verbindung testen“ legt eine Testdatei an, liest sie und löscht sie wieder. Beim Speichern
+kann man die vorhandenen Belege in die neue Ablage übertragen lassen; Belege am alten Ort
+werden aber auch so weiter gefunden. Die Ablage gehört zur Datensicherung dazu.
+
 ## Handy-Version
 
 Unter der Adresse des Servers (z. B. `http://192.168.1.20:8470/`) öffnet jeder Browser auf

@@ -876,6 +876,7 @@ mod tests {
             include_str!("app/recurring.rs"),
             include_str!("app/statements.rs"),
             include_str!("app/settings_more.rs"),
+            include_str!("app/storage.rs"),
             include_str!("server.rs"),
             include_str!("ui_kit.rs"),
             include_str!("pdf.rs"),

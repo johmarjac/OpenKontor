@@ -14,6 +14,8 @@ mod bank;
 mod einvoice;
 #[path = "../exports.rs"]
 mod exports;
+#[path = "../filestore.rs"]
+mod filestore;
 #[path = "../i18n.rs"]
 mod i18n;
 #[path = "../imap.rs"]

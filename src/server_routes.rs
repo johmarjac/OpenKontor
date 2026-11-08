@@ -49,19 +49,19 @@ pub(super) fn route(state: &mut State, method: &Method, path: &str, query: &str,
             if op.admin_only() && role != Role::Admin {
                 return error(403, admin_only);
             }
+            let t = &mut state.tenants[ti];
             let deleted_receipt = match op {
-                Op::DeleteReceipt(id) => Some(id),
+                Op::DeleteReceipt(id) => t.file_key(id).map(|k| (id, k)),
                 _ => None,
             };
-            let t = &mut state.tenants[ti];
             let mut copy = t.stored.data.clone();
             match copy.apply(op, &user) {
                 Ok(id) => {
                     if let Err(e) = t.commit(copy) {
                         return error(500, &e);
                     }
-                    if let Some(rid) = deleted_receipt {
-                        let _ = t.store.delete_file(rid);
+                    if let Some((rid, key)) = deleted_receipt {
+                        t.delete_file(rid, &key);
                     }
                     t.op_reply(id)
                 }
@@ -86,7 +86,7 @@ pub(super) fn route(state: &mut State, method: &Method, path: &str, query: &str,
             let Some(r) = t.stored.data.receipts.iter().find(|r| r.id == id).cloned() else {
                 return error(404, "Beleg nicht gefunden.");
             };
-            match t.store.load_file(id) {
+            match t.get_file(id) {
                 Ok(bytes) => Response::from_data(bytes)
                     .with_header(Header::from_bytes("Content-Type", content_type_for(&r.file_name)).unwrap()),
                 Err(e) => error(404, &e),
@@ -101,7 +101,7 @@ pub(super) fn route(state: &mut State, method: &Method, path: &str, query: &str,
             let Some(mut r) = t.stored.data.receipts.iter().find(|r| r.id == id).cloned() else {
                 return error(404, "Beleg nicht gefunden.");
             };
-            let bytes = match t.store.load_file(id) {
+            let bytes = match t.get_file(id) {
                 Ok(b) => b,
                 Err(e) => return error(404, &e),
             };
@@ -239,8 +239,7 @@ pub(super) fn route(state: &mut State, method: &Method, path: &str, query: &str,
             };
             let t = &mut state.tenants[ti];
             let data = t.stored.data.clone();
-            let store = &mut t.store;
-            let zip = crate::exports::datev_package(&data, from, to, &mut |id| store.load_file(id).ok());
+            let zip = crate::exports::datev_package(&data, from, to, &mut |id| t.get_file(id).ok());
             Response::from_data(zip).with_header(Header::from_bytes("Content-Type", "application/zip").unwrap())
         }
         (&Method::Post, "/api/password") => {
@@ -363,6 +362,73 @@ pub(super) fn route(state: &mut State, method: &Method, path: &str, query: &str,
             t.stored.users.retain(|u| !u.name.eq_ignore_ascii_case(&name));
             state.sessions.retain(|_, s| !(s.tenant == ti && s.user.eq_ignore_ascii_case(&name)));
             state.tenants[ti].save_users(before)
+        }
+        (&Method::Get, "/api/files/settings") => {
+            if let Some(r) = need(role == Role::Admin, "Nur Administratoren dürfen die Belegablage einrichten.") {
+                return r;
+            }
+            let t = &state.tenants[ti];
+            let s = &t.stored.files;
+            let default_dir = t.dir.join("Belege").display().to_string();
+            json_response(200, &serde_json::json!({ "settings": s.without_secrets(), "secret_set": s.has_secret(), "default_dir": default_dir }))
+        }
+        (&Method::Post, "/api/files/settings") => {
+            if let Some(r) = need(role == Role::Admin, "Nur Administratoren dürfen die Belegablage einrichten.") {
+                return r;
+            }
+            #[derive(Deserialize)]
+            struct Req {
+                settings: crate::filestore::FileSettings,
+                #[serde(default)]
+                copy: bool,
+                #[serde(default)]
+                test_only: bool,
+            }
+            let Ok(mut req) = serde_json::from_str::<Req>(body) else {
+                return error(400, "Ungültige Anfrage.");
+            };
+            let t = &mut state.tenants[ti];
+            req.settings.keep_secrets(&t.stored.files);
+            let mut new = match crate::filestore::open(&req.settings, &t.dir) {
+                Ok(b) => b,
+                Err(e) => return error(400, &e),
+            };
+            if let Some(b) = &mut new
+                && let Err(e) = crate::filestore::check(b.as_mut())
+            {
+                return error(502, &format!("Die Ablage funktioniert nicht: {e}"));
+            }
+            if req.test_only {
+                return json_response(200, &serde_json::json!({ "message": "Die Ablage funktioniert." }));
+            }
+            // Bring the files stored so far over to the new place.
+            let mut copied = 0;
+            if req.copy {
+                let ids: Vec<u64> = t.stored.data.receipts.iter().map(|r| r.id).collect();
+                for id in ids {
+                    let Ok(bytes) = t.get_file(id) else { continue };
+                    let key = t.file_key(id).unwrap_or_default();
+                    let r = match &mut new {
+                        Some(b) => b.put(&key, &bytes),
+                        None => {
+                            let _ = t.store.delete_file(id);
+                            t.store.save_file(id, &bytes)
+                        }
+                    };
+                    if let Err(e) = r {
+                        return error(502, &format!("Übertragen abgebrochen nach {copied} Belegen: {e}"));
+                    }
+                    copied += 1;
+                }
+            }
+            let before = std::mem::replace(&mut t.stored.files, req.settings);
+            if let Err(e) = t.save(Change::Files) {
+                t.stored.files = before;
+                return error(500, &format!("Speichern fehlgeschlagen: {e}"));
+            }
+            t.files = new;
+            let msg = if req.copy { format!("Belegablage gespeichert, {copied} Belege übertragen.") } else { "Belegablage gespeichert.".to_string() };
+            json_response(200, &serde_json::json!({ "message": msg }))
         }
         (&Method::Get, "/api/tenants") => json_response(200, &tenant_list(state)),
         (&Method::Post, "/api/tenants") => {
