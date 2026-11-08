@@ -140,6 +140,8 @@ pub enum Cell {
     MoneyColored(Cents, Color32),
     Chip(String),
     MutedColored(String, Color32),
+    /// Text in the colour of amounts, e.g. an amount in another currency.
+    RightText(String),
 }
 
 pub struct Col {
@@ -222,6 +224,9 @@ pub fn table_row(ui: &mut Ui, cols: &[Col], cells: &[Cell], selected: bool) -> R
             }
             Cell::MutedColored(s, col) => {
                 pc.text(pos, align, s, font, *col);
+            }
+            Cell::RightText(s) => {
+                pc.text(pos, align, s, font, TEXT);
             }
             Cell::Chip(label) => {
                 let (bg, fg) = chip_colors(label);

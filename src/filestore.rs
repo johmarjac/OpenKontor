@@ -51,6 +51,11 @@ pub struct FileSettings {
     pub secret_key: String,
     /// S3: address as endpoint/bucket/key (MinIO and most others) instead of bucket.endpoint/key.
     pub path_style: bool,
+    /// S3 Object Lock: keep each file undeletable for this many days (0 = off). The bucket
+    /// must have been created with Object Lock switched on.
+    pub lock_days: u32,
+    /// "COMPLIANCE" (nobody can delete, not even the administrator) or "GOVERNANCE".
+    pub lock_mode: String,
     /// FTP/SFTP server.
     pub host: String,
     pub port: u16,
@@ -251,11 +256,20 @@ impl S3Backend {
         let region = if s.region.trim().is_empty() { "us-east-1" } else { s.region.trim() };
         let amz_date = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
         let payload_hash = hex(&Sha256::digest(body));
-        let headers = vec![
+        let mut headers = vec![
             ("host".to_string(), host.clone()),
             ("x-amz-content-sha256".to_string(), payload_hash.clone()),
             ("x-amz-date".to_string(), amz_date.clone()),
         ];
+        // Locked files (not the connection test) cannot be deleted until the date.
+        if method == "PUT" && s.lock_days > 0 && !key.starts_with("openkontor-test-") {
+            let until = (chrono::Utc::now() + chrono::Duration::days(s.lock_days as i64)).format("%Y-%m-%dT%H:%M:%SZ").to_string();
+            let mode = if s.lock_mode == "GOVERNANCE" { "GOVERNANCE" } else { "COMPLIANCE" };
+            headers.push(("x-amz-object-lock-mode".into(), mode.into()));
+            headers.push(("x-amz-object-lock-retain-until-date".into(), until));
+            headers.push(("x-amz-sdk-checksum-algorithm".into(), "SHA256".into()));
+            headers.push(("x-amz-checksum-sha256".into(), crate::pdf::encode_base64(&Sha256::digest(body))));
+        }
         let auth = sigv4(method, &path, &headers, &payload_hash, &amz_date, region, s.access_key.trim(), &s.secret_key);
         let config = ureq::Agent::config_builder()
             .timeout_global(Some(Duration::from_secs(120)))
@@ -263,25 +277,29 @@ impl S3Backend {
             .build();
         let agent = ureq::Agent::new_with_config(config);
         let url = format!("{scheme}://{host}{path}");
+        let extra: Vec<&(String, String)> = headers.iter().filter(|(k, _)| k != "host").collect();
         let res = match method {
-            "PUT" => agent
-                .put(&url)
-                .header("x-amz-content-sha256", &payload_hash)
-                .header("x-amz-date", &amz_date)
-                .header("Authorization", &auth)
-                .send(body),
-            "DELETE" => agent
-                .delete(&url)
-                .header("x-amz-content-sha256", &payload_hash)
-                .header("x-amz-date", &amz_date)
-                .header("Authorization", &auth)
-                .call(),
-            _ => agent
-                .get(&url)
-                .header("x-amz-content-sha256", &payload_hash)
-                .header("x-amz-date", &amz_date)
-                .header("Authorization", &auth)
-                .call(),
+            "PUT" => {
+                let mut r = agent.put(&url).header("Authorization", &auth);
+                for (k, v) in &extra {
+                    r = r.header(k.as_str(), v.as_str());
+                }
+                r.send(body)
+            }
+            "DELETE" => {
+                let mut r = agent.delete(&url).header("Authorization", &auth);
+                for (k, v) in &extra {
+                    r = r.header(k.as_str(), v.as_str());
+                }
+                r.call()
+            }
+            _ => {
+                let mut r = agent.get(&url).header("Authorization", &auth);
+                for (k, v) in &extra {
+                    r = r.header(k.as_str(), v.as_str());
+                }
+                r.call()
+            }
         };
         let mut res = res.map_err(|e| format!("S3 nicht erreichbar ({e})."))?;
         let status = res.status().as_u16();

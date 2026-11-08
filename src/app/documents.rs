@@ -75,6 +75,10 @@ impl App {
                 if ui.button(t("+ Angebot")).clicked() {
                     self.doc_edit = Some(self.new_doc(DocKind::Angebot));
                 }
+                let overdue = self.data.documents.iter().filter(|d| d.is_overdue(self.today)).count();
+                if overdue > 0 && ui.button(tf!("Mahnlauf ({} überfällig) …", overdue)).clicked() {
+                    self.open_dunning();
+                }
             });
         });
         ui.add_space(8.0);
@@ -97,7 +101,7 @@ impl App {
         let sum: Cents = list
             .iter()
             .filter(|d| d.kind.is_billing() && d.status != DocStatus::Storniert && d.status != DocStatus::Entwurf)
-            .map(|d| d.totals(small).gross)
+            .map(|d| d.to_eur(d.totals(small).gross))
             .sum();
         let count = list.len();
         card(ui, |ui| {
@@ -129,7 +133,11 @@ impl App {
                             if d.kind == DocKind::Lieferschein {
                                 Cell::Muted("–".into())
                             } else {
-                                Cell::Money(d.totals(small).gross)
+                                if d.is_foreign() {
+                                    Cell::RightText(fmt_money_cur(crate::i18n::lang(), d.totals(small).gross, d.currency()))
+                                } else {
+                                    Cell::Money(d.totals(small).gross)
+                                }
                             },
                         ];
                         if table_row(ui, &DOC_COLS, &cells, false).clicked() {
@@ -367,7 +375,7 @@ impl App {
                         let amount = if part { sign * self.doc_pay_amount } else { open - discount };
                         Op::AddPayment(
                             doc.id,
-                            Payment { date: self.doc_paid_date, amount, discount, method: self.doc_pay_method.clone(), bank_tx: None },
+                            Payment { date: self.doc_paid_date, amount, discount, method: self.doc_pay_method.clone(), bank_tx: None, eur: None },
                         )
                     } else if self.doc_paid_discount > 0.0 {
                         Op::MarkPaidWithDiscount(doc.id, self.doc_paid_date, self.doc_paid_discount)
@@ -377,7 +385,7 @@ impl App {
                 }
             });
             if !doc.payments.is_empty() {
-                ui.label(muted(tf!("Bereits bezahlt {} · noch offen {}", fmt_money(doc.paid_total().abs()), fmt_money(open.abs()))));
+                ui.label(muted(tf!("Bereits bezahlt {} · noch offen {}", fmt_money_cur(crate::i18n::lang(), doc.paid_total().abs(), doc.currency()), fmt_money_cur(crate::i18n::lang(), open.abs(), doc.currency()))));
             }
         }
         ui.add_space(10.0);
@@ -515,6 +523,10 @@ impl App {
                             && let Some(c) = self.data.contact(doc.contact_id)
                         {
                             doc.vat_case = c.vat_case;
+                            if doc.currency != c.currency {
+                                doc.currency = c.currency.clone();
+                                doc.exchange_rate = 0.0;
+                            }
                         }
                         ui.label(muted(t("Datum")));
                         date_edit(ui, Id::unique("doc_date"), &mut doc.date);
@@ -549,6 +561,34 @@ impl App {
                             }
                         }
                         ui.end_row();
+                        if doc.kind != DocKind::Lieferschein {
+                            ui.label(muted(t("Währung")));
+                            ui.horizontal(|ui| {
+                                let before = doc.currency().to_string();
+                                let mut cur = before.clone();
+                                egui::ComboBox::from_id_salt("doc_currency").width(80.0).selected_text(&cur).show_ui(ui, |ui| {
+                                    for c in CURRENCIES {
+                                        ui.selectable_value(&mut cur, c.to_string(), c);
+                                    }
+                                });
+                                if cur != before {
+                                    doc.currency = if cur == "EUR" { String::new() } else { cur };
+                                    doc.exchange_rate = 0.0;
+                                }
+                                if doc.is_foreign() {
+                                    ui.label(muted(t("1 EUR =")));
+                                    ui.add(egui::DragValue::new(&mut doc.exchange_rate).range(0.0..=100_000.0).speed(0.001).max_decimals(4));
+                                    ui.label(doc.currency().to_string());
+                                    if ui.button(t("Kurs der EZB")).on_hover_text(t("Holt den heutigen Referenzkurs der Europäischen Zentralbank")).clicked() {
+                                        match export::ecb_rate(doc.currency()) {
+                                            Ok(r) => doc.exchange_rate = r,
+                                            Err(e) => self.toast = Some((tr(&e), true, 0.0)),
+                                        }
+                                    }
+                                }
+                            });
+                            ui.end_row();
+                        }
                         if !small && doc.kind != DocKind::Lieferschein {
                             ui.label(muted(t("Umsatzsteuer")));
                             egui::ComboBox::from_id_salt("doc_vat_case").width(250.0).selected_text(doc.vat_case.label()).show_ui(ui, |ui| {
@@ -626,6 +666,7 @@ impl App {
                         ui.label(muted(t(h)).size(12.5));
                     }
                     ui.end_row();
+                    let cur = doc.currency().to_string();
                     for (i, l) in doc.lines.iter_mut().enumerate() {
                         let id = Id::unique(("line", i));
                         ui.label(muted(format!("{}", i + 1)));
@@ -648,11 +689,11 @@ impl App {
                             ui.label(&l.text);
                             ui.label(fmt_qty(l.qty));
                             ui.label(&l.unit);
-                            ui.label(fmt_money(l.price_net));
+                            ui.label(fmt_money_cur(crate::i18n::lang(), l.price_net, &cur));
                             ui.label(if l.discount_pct > 0.0 { fmt_qty(l.discount_pct) } else { "–".into() });
                             ui.label(if small { String::new() } else { format!("{} %", l.vat) });
                         }
-                        ui.label(RichText::new(fmt_money(l.net())).strong());
+                        ui.label(RichText::new(fmt_money_cur(crate::i18n::lang(), l.net(), &cur)).strong());
                         if editable {
                             ui.horizontal(|ui| {
                                 if i > 0 && crate::icons::icon_only_button(ui, crate::icons::Icon::ArrowUp, t("nach oben")).clicked() {
@@ -719,17 +760,17 @@ impl App {
                     .spacing([24.0, 4.0])
                     .show(ui, |ui| {
                         ui.label(muted(t("Summe netto")));
-                        right_label(ui, 130.0, RichText::new(fmt_money(tot.net)));
+                        right_label(ui, 130.0, RichText::new(fmt_money_cur(crate::i18n::lang(), tot.net, doc.currency())));
                         ui.end_row();
                         for (rate, (_n, tax)) in &tot.by_rate {
                             if *rate > 0 {
                                 ui.label(muted(tf!("Umsatzsteuer {} %", rate)));
-                                right_label(ui, 130.0, RichText::new(fmt_money(*tax)));
+                                right_label(ui, 130.0, RichText::new(fmt_money_cur(crate::i18n::lang(), *tax, doc.currency())));
                                 ui.end_row();
                             }
                         }
                         ui.label(RichText::new(t("Gesamtbetrag")).strong().size(15.0));
-                        right_label(ui, 130.0, RichText::new(fmt_money(tot.gross)).strong().size(15.0));
+                        right_label(ui, 130.0, RichText::new(fmt_money_cur(crate::i18n::lang(), tot.gross, doc.currency())).strong().size(15.0));
                         ui.end_row();
                     });
             });
@@ -756,7 +797,7 @@ impl App {
             if doc.payments.len() > 1 || (doc.status == DocStatus::Offen && !doc.payments.is_empty()) {
                 ui.label(RichText::new(t("Zahlungen")).strong());
                 for p in &doc.payments {
-                    ui.label(muted(tf!("{}: {} per {}", fmt_date(p.date), fmt_money(p.amount.abs()), t(if p.method == CASH { "Kasse" } else { "Bank" }))));
+                    ui.label(muted(tf!("{}: {} per {}", fmt_date(p.date), fmt_money_cur(crate::i18n::lang(), p.amount.abs(), doc.currency()), t(if p.method == CASH { "Kasse" } else { "Bank" }))));
                 }
             }
             if doc.part != InvoicePart::Normal {
@@ -859,21 +900,21 @@ impl App {
                                 |ui| ui.add(egui::Label::new(RichText::new(&l.text).size(10.0)).truncate()),
                             );
                             ui.label(RichText::new(format!("{} {}", fmt_qty(l.qty), l.unit)).size(10.0));
-                            ui.label(RichText::new(fmt_money(l.net())).size(10.0));
+                            ui.label(RichText::new(fmt_money_cur(crate::i18n::lang(), l.net(), doc.currency())).size(10.0));
                             ui.end_row();
                         }
                     });
                 ui.add_space(6.0);
                 ui.with_layout(Layout::top_down(Align::Max), |ui| {
-                    ui.label(RichText::new(tf!("Netto {}", fmt_money(tot.net))).size(10.5));
+                    ui.label(RichText::new(tf!("Netto {}", fmt_money_cur(crate::i18n::lang(), tot.net, doc.currency()))).size(10.5));
                     if !small {
                         for (rate, (_n, tax)) in &tot.by_rate {
                             if *rate > 0 {
-                                ui.label(RichText::new(tf!("USt. {} % {}", rate, fmt_money(*tax))).size(10.5));
+                                ui.label(RichText::new(tf!("USt. {} % {}", rate, fmt_money_cur(crate::i18n::lang(), *tax, doc.currency()))).size(10.5));
                             }
                         }
                     }
-                    ui.label(RichText::new(tf!("Gesamt {}", fmt_money(tot.gross))).size(12.0).strong());
+                    ui.label(RichText::new(tf!("Gesamt {}", fmt_money_cur(crate::i18n::lang(), tot.gross, doc.currency()))).size(12.0).strong());
                 });
                 ui.add_space(6.0);
                 for line in payment_lines(doc, small, self.data.contact(doc.contact_id).map(|k| k.language).unwrap_or_default()) {

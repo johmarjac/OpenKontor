@@ -233,7 +233,7 @@ impl App {
                     let mut chosen: Option<u64> = None;
                     egui::ComboBox::from_id_salt("bank_doc").width(width - 20.0).selected_text(t("Offene Rechnung wählen …")).show_ui(ui, |ui| {
                         for d in self.data.documents.iter().filter(|d| d.kind.is_billing() && d.status == DocStatus::Offen && d.open_amount(small).signum() == tx.amount.signum()) {
-                            let label = format!("{} – {} ({})", d.number, self.data.contact_name(d.contact_id), fmt_money(d.open_amount(small)));
+                            let label = format!("{} – {} ({})", d.number, self.data.contact_name(d.contact_id), fmt_money_cur(crate::i18n::lang(), d.open_amount(small), d.currency()));
                             if ui.selectable_label(false, label).clicked() {
                                 chosen = Some(d.id);
                             }

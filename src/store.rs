@@ -527,6 +527,8 @@ impl PgStore {
         Self::write_records(tx, "recurring", &old.recurring, &new.recurring, |x| x.id)?;
         Self::write_records(tx, "stock", &old.stock_moves, &new.stock_moves, |x| x.id)?;
         Self::write_records(tx, "journal", &old.journal, &new.journal, |x| x.id)?;
+        Self::write_records(tx, "project", &old.projects, &new.projects, |x| x.id)?;
+        Self::write_records(tx, "time", &old.times, &new.times, |x| x.id)?;
         if !same(&old.cash_closings, &new.cash_closings) {
             Self::put_setting(tx, "cash_closings", &serde_json::to_string(&new.cash_closings).map_err(|e| e.to_string())?)?;
         }
@@ -727,6 +729,8 @@ impl PgStore {
                 "recurring" => data.recurring.extend(serde_json::from_str(&json).ok()),
                 "stock" => data.stock_moves.extend(serde_json::from_str(&json).ok()),
                 "journal" => data.journal.extend(serde_json::from_str(&json).ok()),
+                "project" => data.projects.extend(serde_json::from_str(&json).ok()),
+                "time" => data.times.extend(serde_json::from_str(&json).ok()),
                 _ => {}
             }
         }
@@ -852,7 +856,7 @@ mod tests {
         let Ok(url) = std::env::var("OPENKONTOR_TEST_PG") else { return };
         let mut data = sample_data();
         let inv = data.documents.iter().find(|d| d.kind == DocKind::Rechnung && d.status == DocStatus::Offen).unwrap().id;
-        data.apply(Op::AddPayment(inv, Payment { date: today(), amount: 1000, discount: 0, method: "Bank".into(), bank_tx: None }), "t").unwrap();
+        data.apply(Op::AddPayment(inv, Payment { date: today(), amount: 1000, discount: 0, method: "Bank".into(), bank_tx: None, eur: None }), "t").unwrap();
         let cid = data.contacts[0].id;
         data.contacts[0].vat_case = VatCase::ReverseCharge;
         data.contacts[0].iban = "DE02120300000000202051".into();

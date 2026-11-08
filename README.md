@@ -78,6 +78,17 @@ Den Server für den Dauerbetrieb einrichten: [SERVER-INSTALLATION.md](SERVER-INS
 - **Exporte:** DATEV-Buchungsstapel mit Originalbelegen, GoBD-Datenexport für die
   Betriebsprüfung (index.xml + CSV), Vorlage der Verfahrensdokumentation (PDF)
 - Eigenes **Logo** auf allen PDFs
+- **Fremdwährungen:** Belege in USD, GBP, CHF u. a. mit Tageskurs der EZB; Umsatzsteuer
+  zusätzlich in Euro, gebucht wird in Euro (tatsächlicher Bankeingang), Kursdifferenzen in
+  der Bilanz; E-Rechnung mit Steuerwährung Euro
+- **Datenübernahme** aus Lexware und anderen Programmen: Kontakte, Artikel und offene
+  Posten per CSV (Spalten werden erkannt, Vorschau vor dem Übernehmen)
+- **Mahnlauf:** alle überfälligen Rechnungen auf einmal mahnen – per E-Mail oder als PDF
+  für die Post
+- **Liquiditätsvorschau** für die nächsten Wochen
+- **Projekte und Zeiterfassung:** Stunden je Projekt erfassen, Budget im Blick, mit einem
+  Klick in eine Rechnung übernehmen
+- **Revisionssichere Ablage:** Belege im S3-Speicher per Object Lock gegen Löschen sperren
 - **Handy-Version:** Der Server liefert unter seiner Adresse eine Web-App für Smartphone und
   Tablet (Beleg fotografieren, offene Rechnungen, Ausgabe erfassen, Kontakte) – auf den
   Startbildschirm legbar, ohne App-Store
@@ -201,7 +212,6 @@ selbst prüfen kann:
   herunterladen und einlesen.
 - **Versand über das Peppol-Netz:** braucht einen Vertrag mit einem Peppol-Zugangsanbieter.
   E-Rechnungen gehen bis dahin per E-Mail oder als Datei (Upload in Behördenportale).
-- **Fremdwährungen:** Rechnungen sind in Euro.
 - **Eigene Store-App** für Android/iOS: Die Handy-Version im Browser deckt den Alltag ab;
   eine Store-App bräuchte Entwicklerkonten bei Apple und Google.
 - **Automatische Installation von Updates:** Das Programm meldet neue Versionen und öffnet
@@ -210,18 +220,10 @@ selbst prüfen kann:
   nicht mit einem kostenpflichtigen Zertifikat signiert sind (Windows ca. 200–400 € im Jahr,
   Apple-Entwicklerkonto 99 $ im Jahr).
 
-Machbar, aber noch nicht eingebaut (nach Nutzen für den Umstieg und den Alltag):
+Machbar, aber noch nicht eingebaut:
 
-1. **Datenübernahme:** Kontakte, Artikel und offene Posten aus Lexware oder anderen
-   Programmen per CSV einlesen – wichtig für den Umstieg.
-2. **SEPA:** Lieferantenrechnungen als Sammelüberweisung (pain.001) ans Online-Banking
-   geben, Kunden per Lastschrift einziehen (pain.008, mit Mandatsverwaltung).
-3. **Mahnlauf:** alle überfälligen Rechnungen auf einmal mahnen (heute einzeln je Rechnung).
-4. **Liquiditätsvorschau:** Kontostand der nächsten Wochen aus offenen Rechnungen,
-   Eingangsbelegen und wiederkehrenden Zahlungen.
-5. **Projekte und Zeiterfassung:** Stunden erfassen und in Rechnungen übernehmen.
-6. **Revisionssichere Ablage:** Belege im S3-Speicher zusätzlich gegen Löschen sperren
-   (Object Lock).
+- **SEPA:** Lieferantenrechnungen als Sammelüberweisung (pain.001) ans Online-Banking
+  geben, Kunden per Lastschrift einziehen (pain.008, mit Mandatsverwaltung).
 
 **Bitte vor dem Echtbetrieb mit der Steuerberatung abstimmen:** Kontenzuordnung SKR 03/04
 im DATEV-Export, Steuerschlüssel, Bilanzgliederung und die Vorlage der

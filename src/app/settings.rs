@@ -411,6 +411,8 @@ impl App {
     }
 
     fn settings_data(&mut self, ui: &mut Ui) {
+        self.import_card(ui);
+        ui.add_space(12.0);
         let mut import: Option<Data> = None;
         let mut sign_out = false;
         card(ui, |ui| {

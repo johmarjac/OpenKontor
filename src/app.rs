@@ -4,7 +4,9 @@
 mod bank;
 mod books;
 mod documents;
+mod extras;
 mod mailing;
+mod projects;
 mod receipts;
 mod recurring;
 mod reports;
@@ -39,6 +41,7 @@ pub enum Section {
     Kontakte,
     Artikel,
     Belege,
+    Projekte,
     Buchhaltung,
     Bank,
     Belegeingang,
@@ -48,11 +51,12 @@ pub enum Section {
 }
 
 impl Section {
-    const ALL: [Section; 10] = [
+    const ALL: [Section; 11] = [
         Section::Start,
         Section::Kontakte,
         Section::Artikel,
         Section::Belege,
+        Section::Projekte,
         Section::Buchhaltung,
         Section::Bank,
         Section::Belegeingang,
@@ -66,6 +70,7 @@ impl Section {
             Section::Kontakte => "Kontakte",
             Section::Artikel => "Artikel & Leistungen",
             Section::Belege => "Angebote & Rechnungen",
+            Section::Projekte => "Projekte & Zeiten",
             Section::Buchhaltung => "Einnahmen & Ausgaben",
             Section::Bank => "Bank",
             Section::Belegeingang => "Belegeingang",
@@ -80,6 +85,7 @@ impl Section {
             Section::Kontakte => Icon::Users,
             Section::Artikel => Icon::Package,
             Section::Belege => Icon::Document,
+            Section::Projekte => Icon::Clock,
             Section::Buchhaltung => Icon::Wallet,
             Section::Bank => Icon::Bank,
             Section::Belegeingang => Icon::Inbox,
@@ -141,6 +147,7 @@ enum ReportTab {
     Ustva,
     Zm,
     Bilanz,
+    Liquiditaet,
     OffenePosten,
     Kunden,
     Exporte,
@@ -258,6 +265,8 @@ pub struct App {
     stock: stock::StockState,
     security: settings::SecurityState,
     storage: storage::StorageState,
+    projects: projects::ProjectsState,
+    extras: extras::ExtrasState,
 
     shot: Option<Shot>,
     frames: u64,
@@ -344,6 +353,8 @@ impl App {
             stock: Default::default(),
             security: Default::default(),
             storage: Default::default(),
+            projects: Default::default(),
+            extras: Default::default(),
             shot,
             frames: 0,
         };
@@ -1135,6 +1146,7 @@ impl App {
                 }
                 Section::Buchhaltung => self.books_page(ui),
                 Section::Bank => self.bank_page(ui),
+                Section::Projekte => self.projects_page(ui),
                 Section::Belegeingang => self.receipts_page(ui),
                 Section::Auswertungen => self.reports(ui),
                 Section::Protokoll => self.log(ui),
@@ -1345,6 +1357,8 @@ impl App {
         self.books_dialogs(&ctx);
         self.stock_dialogs(&ctx);
         self.bank_dialogs(&ctx);
+        self.project_dialogs(&ctx);
+        self.extras_dialogs(&ctx);
         if self.mail_draft.is_some() {
             self.mail_dialog(&ctx);
         }
@@ -1370,7 +1384,7 @@ impl App {
             .filter(|d| d.kind == DocKind::Rechnung && d.status == DocStatus::Offen)
             .cloned()
             .collect();
-        let open_sum: Cents = open.iter().map(|d| d.totals(small).gross).sum();
+        let open_sum: Cents = open.iter().map(|d| d.to_eur(d.open_amount(small))).sum();
         let overdue = open.iter().filter(|d| d.is_overdue(self.today)).count();
 
         ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
@@ -1520,7 +1534,7 @@ impl App {
                                         ui.label(RichText::new(when).size(12.5).color(if overdue { RED } else { MUTED }));
                                     });
                                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                        ui.label(RichText::new(fmt_money(d.totals(small).gross)).strong());
+                                        ui.label(RichText::new(fmt_money_cur(crate::i18n::lang(), d.open_amount(small), d.currency())).strong());
                                     });
                                 })
                                 .response

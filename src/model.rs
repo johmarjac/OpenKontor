@@ -65,6 +65,9 @@ pub struct Company {
     pub accounting: Accounting,
     /// Cash in hand before the first entry of the cash book.
     pub cash_opening: Cents,
+    /// Balance of the business account on a day, as start of the cash-flow forecast.
+    pub bank_balance: Cents,
+    pub bank_balance_date: Option<NaiveDate>,
 }
 
 /// A logo as plain RGB pixels (compressed, base64), ready to be placed in PDFs.
@@ -134,6 +137,8 @@ impl Default for Company {
             chart: Chart::Skr03,
             accounting: Accounting::Euer,
             cash_opening: 0,
+            bank_balance: 0,
+            bank_balance_date: None,
         }
     }
 }
@@ -339,6 +344,8 @@ pub struct Contact {
     pub vat_case: VatCase,
     /// Bank account, to recognise payments in bank statements.
     pub iban: String,
+    /// Currency of this contact's documents (ISO code); empty = euro.
+    pub currency: String,
 }
 
 /// How VAT applies to a document.
@@ -419,6 +426,7 @@ impl Default for Contact {
             einvoice: None,
             vat_case: VatCase::Inland,
             iban: String::new(),
+            currency: String::new(),
         }
     }
 }
@@ -541,6 +549,8 @@ pub struct Payment {
     pub method: String,
     /// The bank statement line this payment came from.
     pub bank_tx: Option<u64>,
+    /// For documents in another currency: the euros actually received.
+    pub eur: Option<Cents>,
 }
 
 impl DocStatus {
@@ -630,6 +640,10 @@ pub struct Document {
     pub vat_case: VatCase,
     /// Payments received so far (several for part payments).
     pub payments: Vec<Payment>,
+    /// Currency of the document (ISO code, e.g. "USD"); empty = euro.
+    pub currency: String,
+    /// Units of the currency for one euro (as the ECB publishes it), e.g. 1.0832 for USD.
+    pub exchange_rate: f64,
 }
 
 impl Default for Document {
@@ -657,6 +671,8 @@ impl Default for Document {
             part: InvoicePart::Normal,
             vat_case: VatCase::Inland,
             payments: Vec::new(),
+            currency: String::new(),
+            exchange_rate: 0.0,
         }
     }
 }
@@ -739,6 +755,20 @@ impl Document {
         self.kind == DocKind::Rechnung && self.status == DocStatus::Offen && self.due_date() < today
     }
 
+    /// The currency code; euro when none is set.
+    pub fn currency(&self) -> &str {
+        if self.currency.trim().is_empty() { "EUR" } else { self.currency.trim() }
+    }
+
+    pub fn is_foreign(&self) -> bool {
+        self.currency() != "EUR"
+    }
+
+    /// An amount of this document in euros (at the document's exchange rate).
+    pub fn to_eur(&self, c: Cents) -> Cents {
+        if !self.is_foreign() || self.exchange_rate <= 0.0 { c } else { (c as f64 / self.exchange_rate).round() as Cents }
+    }
+
     /// Paid so far, including accepted discounts (same sign as the total).
     pub fn paid_total(&self) -> Cents {
         self.payments.iter().map(|p| p.amount + p.discount).sum()
@@ -766,6 +796,7 @@ impl Document {
             discount: gross - amount,
             method: "Bank".into(),
             bank_tx: None,
+            eur: None,
         }]
     }
 }
@@ -1011,7 +1042,51 @@ pub struct Data {
     pub journal: Vec<JournalEntry>,
     /// Days whose cash book is closed (no more changes up to and including the date).
     pub cash_closings: Vec<CashClosing>,
+    pub projects: Vec<Project>,
+    pub times: Vec<TimeEntry>,
     pub next_id: u64,
+}
+
+/// A project or job; hours are recorded on it and billed.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Project {
+    pub id: u64,
+    pub number: String,
+    pub name: String,
+    pub contact_id: Option<u64>,
+    /// Net price per hour.
+    pub rate: Cents,
+    /// Planned hours (0 = no budget).
+    pub budget_hours: f64,
+    pub active: bool,
+    pub note: String,
+}
+
+impl Default for Project {
+    fn default() -> Self {
+        Self { id: 0, number: String::new(), name: String::new(), contact_id: None, rate: 9500, budget_hours: 0.0, active: true, note: String::new() }
+    }
+}
+
+/// Time worked on a project.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TimeEntry {
+    pub id: u64,
+    pub project_id: u64,
+    pub date: NaiveDate,
+    pub user: String,
+    pub hours: f64,
+    pub text: String,
+    /// Billed with this invoice.
+    pub invoice_id: Option<u64>,
+}
+
+impl Default for TimeEntry {
+    fn default() -> Self {
+        Self { id: 0, project_id: 0, date: today(), user: String::new(), hours: 1.0, text: String::new(), invoice_id: None }
+    }
 }
 
 /// One line of a bank statement.
@@ -1295,6 +1370,17 @@ pub enum Op {
     IgnoreBank(u64),
     SaveJournal(JournalEntry),
     DeleteJournal(u64),
+    /// Takes over contacts from another program; existing numbers are skipped.
+    ImportContacts(Vec<Contact>),
+    ImportArticles(Vec<Article>),
+    /// Open invoices from another program, with their numbers and amounts.
+    ImportOpenItems(Vec<Document>),
+    SaveProject(Project),
+    DeleteProject(u64),
+    SaveTime(TimeEntry),
+    DeleteTime(u64),
+    /// Makes a draft invoice from time entries of a project.
+    BillTimes(u64, Vec<u64>),
 }
 
 impl Op {
@@ -1326,7 +1412,13 @@ impl Op {
             | Op::StockCorrection(..)
             | Op::SaveRecurring(_)
             | Op::DeleteRecurring(_)
-            | Op::CreateDueRecurring(_) => OpArea::Sales,
+            | Op::CreateDueRecurring(_)
+            | Op::SaveProject(_)
+            | Op::DeleteProject(_)
+            | Op::SaveTime(_)
+            | Op::DeleteTime(_)
+            | Op::BillTimes(..) => OpArea::Sales,
+            Op::ImportContacts(_) | Op::ImportArticles(_) | Op::ImportOpenItems(_) => OpArea::Settings,
             Op::AddReceipt(_) | Op::SaveReceipt(_) | Op::DiscardReceipt(_) | Op::DeleteReceipt(_) => OpArea::Receipts,
             Op::SaveCompany(_) | Op::ReplaceAll(_) => OpArea::Settings,
             _ => OpArea::Accounting,
@@ -1465,6 +1557,10 @@ impl Data {
                 }
                 let kind = self.documents[i].kind;
                 self.documents.remove(i);
+                // Hours billed with this draft can be billed again.
+                for t in self.times.iter_mut().filter(|t| t.invoice_id == Some(id)) {
+                    t.invoice_id = None;
+                }
                 Ok((None, format!("{}-Entwurf gelöscht", kind.name())))
             }
             Op::FinalizeDocument(id) => {
@@ -1772,6 +1868,170 @@ impl Data {
                 let msg = format!("Umbuchung {} an {} über {} gelöscht", e.debit, e.credit, fmt_money(e.amount));
                 self.journal.retain(|e| e.id != id);
                 Ok((None, msg))
+            }
+            Op::ImportContacts(list) => {
+                let (mut added, mut skipped) = (0, 0);
+                for mut c in list {
+                    let dup = self.contacts.iter().any(|x| {
+                        (!c.number.is_empty() && x.number == c.number)
+                            || (x.display_name().eq_ignore_ascii_case(&c.display_name()) && x.zip_city == c.zip_city)
+                    });
+                    if dup || (c.company.trim().is_empty() && c.person.trim().is_empty()) {
+                        skipped += 1;
+                        continue;
+                    }
+                    c.id = self.new_id();
+                    if c.number.trim().is_empty() {
+                        c.number = self.next_contact_number();
+                    }
+                    self.contacts.push(c);
+                    added += 1;
+                }
+                Ok((None, format!("{added} Kontakte übernommen ({skipped} übersprungen)")))
+            }
+            Op::ImportArticles(list) => {
+                let (mut added, mut skipped) = (0, 0);
+                for mut a in list {
+                    let dup = self.articles.iter().any(|x| (!a.number.is_empty() && x.number == a.number) || x.name.eq_ignore_ascii_case(&a.name));
+                    if dup || a.name.trim().is_empty() {
+                        skipped += 1;
+                        continue;
+                    }
+                    a.id = self.new_id();
+                    if a.number.trim().is_empty() {
+                        a.number = self.next_article_number();
+                    }
+                    self.articles.push(a);
+                    added += 1;
+                }
+                Ok((None, format!("{added} Artikel übernommen ({skipped} übersprungen)")))
+            }
+            Op::ImportOpenItems(list) => {
+                let (mut added, mut skipped) = (0, 0);
+                for mut d in list {
+                    if d.number.trim().is_empty() || self.documents.iter().any(|x| x.number == d.number) || d.contact_id.is_none() {
+                        skipped += 1;
+                        continue;
+                    }
+                    d.id = self.new_id();
+                    d.status = DocStatus::Offen;
+                    d.payments.clear();
+                    self.documents.push(d);
+                    added += 1;
+                }
+                Ok((None, format!("{added} offene Posten übernommen ({skipped} übersprungen)")))
+            }
+            Op::SaveProject(mut p) => {
+                if p.name.trim().is_empty() {
+                    return Err("Bitte einen Projektnamen eingeben.".into());
+                }
+                let msg = format!("Projekt „{}“ gespeichert", p.name);
+                if p.id == 0 {
+                    p.id = self.new_id();
+                    if p.number.trim().is_empty() {
+                        p.number = format!("P-{:04}", self.projects.len() + 1);
+                    }
+                    let id = p.id;
+                    self.projects.push(p);
+                    Ok((Some(id), msg))
+                } else {
+                    let slot = self.projects.iter_mut().find(|x| x.id == p.id).ok_or("Projekt nicht gefunden.")?;
+                    let id = p.id;
+                    *slot = p;
+                    Ok((Some(id), msg))
+                }
+            }
+            Op::DeleteProject(id) => {
+                if self.times.iter().any(|t| t.project_id == id) {
+                    return Err("Zu diesem Projekt gibt es Zeiten. Beenden Sie es stattdessen („nicht aktiv“).".into());
+                }
+                let name = self.projects.iter().find(|p| p.id == id).map(|p| p.name.clone()).ok_or("Projekt nicht gefunden.")?;
+                self.projects.retain(|p| p.id != id);
+                Ok((None, format!("Projekt „{name}“ gelöscht")))
+            }
+            Op::SaveTime(mut e) => {
+                if !self.projects.iter().any(|p| p.id == e.project_id) {
+                    return Err("Bitte ein Projekt wählen.".into());
+                }
+                if !(e.hours > 0.0 && e.hours <= 24.0) {
+                    return Err("Bitte die Stunden angeben (höchstens 24 am Tag).".into());
+                }
+                if let Some(old) = self.times.iter().find(|x| x.id == e.id && e.id != 0)
+                    && old.invoice_id.is_some()
+                {
+                    return Err("Diese Zeit ist schon abgerechnet.".into());
+                }
+                let msg = format!("{} Stunden „{}“ erfasst", fmt_qty(e.hours), e.text);
+                if e.id == 0 {
+                    e.id = self.new_id();
+                    e.invoice_id = None;
+                    let id = e.id;
+                    self.times.push(e);
+                    self.times.sort_by_key(|t| t.date);
+                    Ok((Some(id), msg))
+                } else {
+                    let slot = self.times.iter_mut().find(|x| x.id == e.id).ok_or("Zeit nicht gefunden.")?;
+                    let id = e.id;
+                    *slot = e;
+                    Ok((Some(id), msg))
+                }
+            }
+            Op::DeleteTime(id) => {
+                let e = self.times.iter().find(|t| t.id == id).ok_or("Zeit nicht gefunden.")?;
+                if e.invoice_id.is_some() {
+                    return Err("Diese Zeit ist schon abgerechnet.".into());
+                }
+                let msg = format!("Zeit „{}“ ({} Std.) gelöscht", e.text, fmt_qty(e.hours));
+                self.times.retain(|t| t.id != id);
+                Ok((None, msg))
+            }
+            Op::BillTimes(project_id, ids) => {
+                let p = self.projects.iter().find(|p| p.id == project_id).cloned().ok_or("Projekt nicht gefunden.")?;
+                let Some(cid) = p.contact_id else {
+                    return Err("Bitte dem Projekt zuerst einen Kunden zuordnen.".into());
+                };
+                let entries: Vec<TimeEntry> =
+                    self.times.iter().filter(|t| t.project_id == project_id && ids.contains(&t.id) && t.invoice_id.is_none()).cloned().collect();
+                if entries.is_empty() {
+                    return Err("Keine offenen Zeiten ausgewählt.".into());
+                }
+                let lang = self.contact(Some(cid)).map(|c| c.language).unwrap_or_default();
+                let lines = entries
+                    .iter()
+                    .map(|e| Line {
+                        article_id: None,
+                        text: if e.text.trim().is_empty() { format!("{} {}", fmt_date_in(lang, e.date), p.name) } else { format!("{}: {}", fmt_date_in(lang, e.date), e.text) },
+                        qty: e.hours,
+                        unit: crate::i18n::t_in(lang, "Std.").into(),
+                        price_net: p.rate,
+                        vat: 19,
+                        discount_pct: 0.0,
+                    })
+                    .collect();
+                let first = entries.iter().map(|e| e.date).min().unwrap_or_else(today);
+                let last = entries.iter().map(|e| e.date).max().unwrap_or_else(today);
+                let id = self.new_id();
+                let mut doc = Document {
+                    id,
+                    kind: DocKind::Rechnung,
+                    contact_id: Some(cid),
+                    title: format!("{} {}", crate::i18n::t_in(lang, "Rechnung"), p.name),
+                    intro: crate::i18n::t_in(lang, "Für unsere Leistungen berechnen wir Ihnen:").into(),
+                    outro: crate::i18n::t_in(lang, "Vielen Dank für die gute Zusammenarbeit.").into(),
+                    service_date: if first == last { fmt_date_in(lang, first) } else { format!("{} – {}", fmt_date_in(lang, first), fmt_date_in(lang, last)) },
+                    lines,
+                    ..Document::default()
+                };
+                if let Some(c) = self.contact(Some(cid)) {
+                    doc.vat_case = c.vat_case;
+                    doc.currency = c.currency.clone();
+                }
+                doc.apply_term(&self.term_for(Some(cid)));
+                self.documents.push(doc);
+                for t in self.times.iter_mut().filter(|t| entries.iter().any(|e| e.id == t.id)) {
+                    t.invoice_id = Some(id);
+                }
+                Ok((Some(id), format!("{} Zeiten aus Projekt „{}“ in einen Rechnungsentwurf übernommen", entries.len(), p.name)))
             }
             Op::ConvertOffer(id) => {
                 let i = self.doc_index(id)?;
@@ -2125,7 +2385,7 @@ impl Data {
         let gross = d.totals(small).gross;
         let open = d.open_amount(small);
         let discount = ((gross as f64 * pct / 100.0).round() as Cents).clamp(-open.abs(), open.abs());
-        self.add_payment(id, Payment { date, amount: open - discount, discount, method: "Bank".into(), bank_tx: None })
+        self.add_payment(id, Payment { date, amount: open - discount, discount, method: "Bank".into(), bank_tx: None, eur: None })
     }
 
     /// Records a payment; the document counts as paid once nothing is left open.
@@ -2506,14 +2766,22 @@ impl Data {
                 if open.signum() != tx.amount.signum() {
                     return Err("Der Betrag passt nicht zur Richtung des Belegs (Eingang/Ausgang).".into());
                 }
-                let rest = if discount { open - tx.amount } else { 0 };
+                // Bank lines are in euros; a document in another currency is paid in full
+                // unless clearly less arrived (exchange rates move a little).
+                let (amount, eur) = if d.is_foreign() {
+                    let converted = (tx.amount as f64 * d.exchange_rate.max(0.0001)).round() as Cents;
+                    if converted.abs() as f64 >= open.abs() as f64 * 0.97 { (open, Some(tx.amount)) } else { (converted, Some(tx.amount)) }
+                } else {
+                    (tx.amount, None)
+                };
+                let rest = if discount && eur.is_none() { open - tx.amount } else { 0 };
                 if discount && (rest.signum() != open.signum() || rest.abs() * 10 > gross.abs()) {
                     return Err("Der Abzug wäre größer als 10 %. Bitte als Teilzahlung zuordnen.".into());
                 }
                 let number = d.number.clone();
                 self.add_payment(
                     id,
-                    Payment { date: tx.date, amount: tx.amount, discount: rest, method: "Bank".into(), bank_tx: Some(tx_id) },
+                    Payment { date: tx.date, amount, discount: rest, method: "Bank".into(), bank_tx: Some(tx_id), eur },
                 )?;
                 (BankLink::Document(id), format!("Bankumsatz von {} der Rechnung {number} zugeordnet", tx.name))
             }
@@ -2593,12 +2861,14 @@ impl Data {
             } else if several {
                 text.push_str(" (Teilzahlung)");
             }
-            let mut rest = p.amount;
+            // Entries are always in euros: what arrived, or the amount at the document's rate.
+            let paid = p.eur.unwrap_or_else(|| doc.to_eur(p.amount));
+            let mut rest = paid;
             for (k, (rate, gross)) in rates.iter().enumerate() {
                 let part = if k + 1 == rates.len() {
                     rest
                 } else {
-                    (p.amount as f64 * *gross as f64 / totals.gross as f64).round() as Cents
+                    (paid as f64 * *gross as f64 / totals.gross as f64).round() as Cents
                 };
                 rest -= part;
                 if part == 0 {
@@ -2799,6 +3069,23 @@ pub fn fmt_money_in(lang: Lang, c: Cents) -> String {
     }
 }
 
+/// Money in a currency: euros as usual, others with their code ("1.234,56 USD").
+pub fn fmt_money_cur(lang: Lang, c: Cents, currency: &str) -> String {
+    let code = currency.trim();
+    if code.is_empty() || code == "EUR" {
+        return fmt_money_in(lang, c);
+    }
+    let n = match lang {
+        Lang::De => fmt_amount(c),
+        Lang::En => fmt_amount(c).replace('.', "#").replace(',', ".").replace('#', ","),
+    };
+    format!("{n} {code}")
+}
+
+/// Currencies to choose from for documents.
+pub const CURRENCIES: [&str; 16] =
+    ["EUR", "USD", "GBP", "CHF", "PLN", "CZK", "DKK", "SEK", "NOK", "HUF", "RON", "TRY", "JPY", "CNY", "CAD", "AUD"];
+
 /// A date as written in a language: "07.11.2026" or "7 Nov 2026".
 pub fn fmt_date_in(lang: Lang, d: NaiveDate) -> String {
     match lang {
@@ -2836,12 +3123,12 @@ pub fn payment_lines(doc: &Document, small_business: bool, lang: Lang) -> Vec<St
             if *pct > 0.0 {
                 fill(
                     t_in(lang, "Bei Zahlung bis {} abzüglich {} % Skonto: {}"),
-                    &[&fmt_date_in(lang, *date), &fmt_qty_in(lang, *pct), &fmt_money_in(lang, *amount)],
+                    &[&fmt_date_in(lang, *date), &fmt_qty_in(lang, *pct), &fmt_money_cur(lang, *amount, doc.currency())],
                 )
             } else {
                 fill(
                     t_in(lang, "Bei Zahlung bis {} ohne Abzug: {}"),
-                    &[&fmt_date_in(lang, *date), &fmt_money_in(lang, *amount)],
+                    &[&fmt_date_in(lang, *date), &fmt_money_cur(lang, *amount, doc.currency())],
                 )
             }
         })
@@ -3274,6 +3561,30 @@ pub fn sample_data() -> Data {
         d.bank.push(tx);
     }
     d.bank.sort_by_key(|t| (t.date, t.id));
+
+    // A project with recorded hours, partly not yet invoiced.
+    let pid = d.new_id();
+    d.projects.push(Project {
+        id: pid,
+        number: "P-0001".into(),
+        name: "Relaunch Website".into(),
+        contact_id: Some(d.contacts[1].id),
+        rate: 9500,
+        budget_hours: 40.0,
+        ..Project::default()
+    });
+    for (ago, hours, text, user) in [
+        (12i64, 3.0, "Workshop Anforderungen", "Alex"),
+        (9, 2.5, "Entwurf Startseite", "Alex"),
+        (6, 4.0, "Umsetzung Vorlagen", "Sam"),
+        (3, 1.5, "Abstimmung mit dem Kunden", "Alex"),
+        (1, 3.5, "Inhalte übernehmen", "Sam"),
+    ] {
+        let id = d.new_id();
+        d.times.push(TimeEntry { id, project_id: pid, date: t - Duration::days(ago), user: user.into(), hours, text: text.into(), invoice_id: None });
+    }
+    d.company.bank_balance = 1_245_000;
+    d.company.bank_balance_date = Some(t);
     d
 }
 

@@ -213,14 +213,14 @@ pub fn render(text: &str, data: &Data, doc: &Document, fee: Cents, deadline: chr
         ("{anrede}", greeting),
         ("{nummer}", doc.number.clone()),
         ("{datum}", fmt_date_in(lang, doc.date)),
-        ("{betrag}", fmt_money_in(lang, gross)),
+        ("{betrag}", fmt_money_cur(lang, gross, doc.currency())),
         ("{faellig}", fmt_date_in(lang, doc.due_date())),
         ("{zahlung}", payment_lines(doc, small, lang).join("\n")),
         ("{firma}", c.name.clone()),
         ("{absender}", sender),
         ("{kunde}", data.contact_name(doc.contact_id)),
-        ("{gebuehr}", fmt_money_in(lang, fee)),
-        ("{gesamt}", fmt_money_in(lang, gross + fees)),
+        ("{gebuehr}", fmt_money_cur(lang, fee, doc.currency())),
+        ("{gesamt}", fmt_money_cur(lang, gross + fees, doc.currency())),
         ("{neue_frist}", fmt_date_in(lang, deadline)),
     ]
     .iter()

@@ -66,8 +66,8 @@ impl App {
                         .filter(|d| d.contact_id == Some(c.id) && d.kind != DocKind::Angebot)
                     {
                         match d.status {
-                            DocStatus::Bezahlt => revenue += d.totals(small).net,
-                            DocStatus::Offen => due += d.totals(small).gross,
+                            DocStatus::Bezahlt => revenue += d.to_eur(d.totals(small).net),
+                            DocStatus::Offen => due += d.to_eur(d.open_amount(small)),
                             _ => {}
                         }
                     }
@@ -135,6 +135,15 @@ impl App {
                     text_row(ui, t("Telefon"), &mut c.phone, 380.0);
                     text_row(ui, t("USt-IdNr."), &mut c.vat_id, 380.0);
                     text_row(ui, t("IBAN"), &mut c.iban, 380.0);
+                    ui.label(muted(t("Währung")));
+                    let mut cur = if c.currency.is_empty() { "EUR".to_string() } else { c.currency.clone() };
+                    egui::ComboBox::from_id_salt("contact_currency").width(80.0).selected_text(&cur).show_ui(ui, |ui| {
+                        for code in CURRENCIES {
+                            ui.selectable_value(&mut cur, code.to_string(), code);
+                        }
+                    });
+                    c.currency = if cur == "EUR" { String::new() } else { cur };
+                    ui.end_row();
                     ui.label(muted(t("Umsatzsteuer")));
                     egui::ComboBox::from_id_salt("contact_vat_case")
                         .width(300.0)
@@ -216,7 +225,7 @@ impl App {
                                 }
                                 ui.label(muted(fmt_date(d.date)));
                                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                    ui.label(fmt_money(d.totals(self.data.company.small_business).gross));
+                                    ui.label(fmt_money_cur(crate::i18n::lang(), d.totals(self.data.company.small_business).gross, d.currency()));
                                     chip(ui, status_label(d, self.today));
                                 });
                             });

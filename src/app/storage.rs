@@ -85,6 +85,17 @@ impl App {
                     ui.label("");
                     ui.checkbox(&mut s.path_style, t("Adresse im Pfad-Stil (MinIO, Hetzner, Ceph …)"));
                     ui.end_row();
+                    ui.label(muted(t("Gegen Löschen sperren")));
+                    ui.horizontal(|ui| {
+                        ui.add(egui::DragValue::new(&mut s.lock_days).range(0..=3650).suffix(t(" Tage")));
+                        egui::ComboBox::from_id_salt("lock_mode")
+                            .selected_text(if s.lock_mode == "GOVERNANCE" { t("Governance (Administrator kann aufheben)") } else { t("Compliance (niemand kann löschen)") })
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(&mut s.lock_mode, "COMPLIANCE".to_string(), t("Compliance (niemand kann löschen)"));
+                                ui.selectable_value(&mut s.lock_mode, "GOVERNANCE".to_string(), t("Governance (Administrator kann aufheben)"));
+                            });
+                    });
+                    ui.end_row();
                 }
                 FileKind::Ftp | FileKind::Sftp => {
                     ui.label(muted(t("Server")));
@@ -118,6 +129,9 @@ impl App {
                     ui.end_row();
                 }
             });
+            if s.kind == FileKind::S3 && s.lock_days > 0 {
+                ui.label(muted(t("Revisionssichere Ablage: Jede Belegdatei bleibt so viele Tage unveränderbar und unlöschbar (S3 Object Lock). Der Bucket muss mit eingeschaltetem Object Lock angelegt sein. Für die Aufbewahrungspflicht z. B. 3650 Tage (10 Jahre).")));
+            }
             match s.kind {
                 FileKind::Sftp => {
                     ui.label(muted(t("SFTP nutzt das Programm „sftp“ (OpenSSH) des Servers mit einem Schlüssel ohne Passwort. Den öffentlichen Schlüssel auf dem SFTP-Server bei diesem Benutzer eintragen.")));

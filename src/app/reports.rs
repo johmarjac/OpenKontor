@@ -15,6 +15,7 @@ impl App {
             ui.selectable_value(&mut self.report_tab, ReportTab::Ustva, t("Umsatzsteuer-Voranmeldung"));
             ui.selectable_value(&mut self.report_tab, ReportTab::Zm, t("Zusammenfassende Meldung"));
             ui.selectable_value(&mut self.report_tab, ReportTab::Bilanz, t("GuV & Bilanz"));
+            ui.selectable_value(&mut self.report_tab, ReportTab::Liquiditaet, t("Liquidität"));
             ui.selectable_value(&mut self.report_tab, ReportTab::OffenePosten, t("Offene Posten"));
             ui.selectable_value(&mut self.report_tab, ReportTab::Kunden, t("Umsatz je Kunde"));
             ui.selectable_value(&mut self.report_tab, ReportTab::Exporte, t("Exporte"));
@@ -50,12 +51,19 @@ impl App {
         let r = period_report(&self.data, from, to);
         let range = format!("{} – {}", fmt_date(from), fmt_date(to));
         let mut open = None;
+        if self.report_tab == ReportTab::OffenePosten && self.data.documents.iter().any(|d| d.is_overdue(self.today)) {
+            if ui.button(t("Mahnlauf für alle überfälligen Rechnungen …")).clicked() {
+                self.open_dunning();
+            }
+            ui.add_space(6.0);
+        }
         ScrollArea::vertical().auto_shrink(false).show(ui, |ui| match self.report_tab {
             ReportTab::Euer => self.report_euer(ui, &r, &range),
             ReportTab::AnlageEuer => self.report_anlage_euer(ui),
             ReportTab::Ustva => self.report_ustva(ui, &r, &range),
             ReportTab::Zm => self.report_zm(ui, from, to, &range),
             ReportTab::Bilanz => self.report_statements(ui),
+            ReportTab::Liquiditaet => self.report_forecast(ui),
             ReportTab::OffenePosten => open = self.report_open_items(ui),
             ReportTab::Kunden => self.report_customers(ui, from, to, &range),
             ReportTab::Exporte => self.report_exports(ui, from, to, &range),
@@ -223,16 +231,16 @@ impl App {
                     Cell::T(fmt_date(d.due_date())),
                     stage,
                     if days > 0 {
-                        Cell::MoneyColored(d.totals(small).gross, RED)
+                        Cell::MoneyColored(d.to_eur(d.open_amount(small)), RED)
                     } else {
-                        Cell::Money(d.totals(small).gross)
+                        Cell::Money(d.to_eur(d.open_amount(small)))
                     },
                 ];
                 if table_row(ui, &cols, &cells, false).clicked() {
                     open = Some(d.id);
                 }
             }
-            let sum: Cents = list.iter().map(|d| d.totals(small).gross).sum();
+            let sum: Cents = list.iter().map(|d| d.to_eur(d.open_amount(small))).sum();
             ui.add_space(6.0);
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.label(RichText::new(fmt_money(sum)).strong());
@@ -258,7 +266,7 @@ impl App {
                         && d.date <= to
                 })
                 .collect();
-            let net: Cents = docs.iter().map(|d| d.totals(small).net).sum();
+            let net: Cents = docs.iter().map(|d| d.to_eur(d.totals(small).net)).sum();
             if net != 0 {
                 sums.push((c.display_name(), net, docs.len()));
             }

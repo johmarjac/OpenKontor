@@ -17,6 +17,7 @@ mod exports;
 mod filestore;
 mod i18n;
 mod icons;
+mod import;
 mod imap;
 mod inbox;
 mod mail;

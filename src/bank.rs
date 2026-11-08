@@ -310,7 +310,14 @@ pub fn suggestions(data: &Data, tx: &BankTx) -> Vec<Suggestion> {
             .discounts
             .iter()
             .any(|s| (open - (gross as f64 * s.percent / 100.0).round() as Cents) == tx.amount);
-        let exact = open == tx.amount;
+        // Documents in another currency are compared in euros, with room for the exchange rate.
+        let exact = if d.is_foreign() {
+            let eur = d.to_eur(open) as f64;
+            (tx.amount as f64 - eur).abs() <= eur.abs() * 0.03
+        } else {
+            open == tx.amount
+        };
+        let with_discount = with_discount && !d.is_foreign();
         let score = match (by_number, exact || with_discount, by_name) {
             (true, true, _) => 100,
             (true, false, _) => 80,
@@ -321,7 +328,7 @@ pub fn suggestions(data: &Data, tx: &BankTx) -> Vec<Suggestion> {
         };
         let label = if with_discount && !exact {
             crate::tf!("{} {} – {} (mit Skonto)", d.kind.label(), d.number, data.contact_name(d.contact_id))
-        } else if (tx.amount.abs()) < open.abs() {
+        } else if !exact && tx.amount.abs() < d.to_eur(open).abs() {
             crate::tf!("{} {} – {} (Teilzahlung)", d.kind.label(), d.number, data.contact_name(d.contact_id))
         } else {
             format!("{} {} – {}", d.kind.label(), d.number, data.contact_name(d.contact_id))
@@ -438,7 +445,7 @@ mod tests {
         let inv = data.documents.iter().find(|d| d.kind == DocKind::Rechnung && d.status == DocStatus::Offen).cloned().unwrap();
         let open = inv.open_amount(small);
         let first = open / 3;
-        let pay = |amount| Payment { date: today(), amount, discount: 0, method: "Bank".into(), bank_tx: None };
+        let pay = |amount| Payment { date: today(), amount, discount: 0, method: "Bank".into(), bank_tx: None, eur: None };
         data.apply(Op::AddPayment(inv.id, pay(first)), "t").unwrap();
         let d = data.documents.iter().find(|d| d.id == inv.id).unwrap();
         assert_eq!(d.status, DocStatus::Offen);

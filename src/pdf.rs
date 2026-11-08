@@ -601,7 +601,7 @@ pub fn reminder_pdf(data: &Data, doc: &Document, r: &ReminderRecord) -> Vec<u8> 
     let contact = data.contact(doc.contact_id);
     let lang = contact.map(|k| k.language).unwrap_or_default();
     let l = |de| t_in(lang, de);
-    let money = |v: Cents| fmt_money_in(lang, v);
+    let money = |v: Cents| fmt_money_cur(lang, v, doc.currency());
     let date = |d: chrono::NaiveDate| fmt_date_in(lang, d);
     let gross = doc.totals(small).gross;
     let earlier: Vec<&ReminderRecord> = doc.reminders.iter().filter(|x| x.date <= r.date && *x != r).collect();
@@ -719,7 +719,7 @@ fn document_pages(data: &Data, doc: &Document) -> (Vec<Page>, String, String) {
     let totals = doc.totals(small);
     let lang = contact.map(|k| k.language).unwrap_or_default();
     let l = |de| t_in(lang, de);
-    let money = |c: Cents| fmt_money_in(lang, c);
+    let money = |c: Cents| fmt_money_cur(lang, c, doc.currency());
     let date = |d: chrono::NaiveDate| fmt_date_in(lang, d);
     let kind = l(doc.kind.name());
     let number = if doc.number.is_empty() { l("ENTWURF").to_string() } else { doc.number.clone() };
@@ -882,6 +882,15 @@ fn document_pages(data: &Data, doc: &Document) -> (Vec<Page>, String, String) {
             y -= 12.0;
         }
         y -= 4.0;
+    }
+    // Invoices in another currency state the VAT in euros as well (§ 16 Abs. 6 UStG).
+    if doc.is_foreign() && totals.tax != 0 && doc.exchange_rate > 0.0 {
+        let text = crate::i18n::fill(
+            l("Umsatzsteuer in Euro: {} (Kurs: 1 EUR = {} {})"),
+            &[&fmt_money_in(lang, doc.to_eur(totals.tax)), &format!("{:.4}", doc.exchange_rate), &doc.currency()],
+        );
+        p.text(LEFT, y, 8.5, false, MUTED, Align::Left, &text);
+        y -= 14.0;
     }
     let paid = doc.paid_total();
     if doc.kind.is_billing() && paid != 0 && doc.status == DocStatus::Offen {

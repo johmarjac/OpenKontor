@@ -30,6 +30,7 @@ pub enum Icon {
     Repeat,
     Lock,
     Download,
+    Clock,
 }
 
 struct Pen<'a> {
@@ -215,6 +216,10 @@ pub fn paint_icon(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
             pen.rect(5.0, 10.5, 19.0, 20.5, 2.0);
             pen.arc(12.0, 10.5, 4.5, 180.0, 360.0);
             pen.dot(12.0, 15.5, 1.2);
+        }
+        Icon::Clock => {
+            pen.circle(12.0, 12.0, 8.5);
+            pen.line(&[(12.0, 7.0), (12.0, 12.0), (15.5, 14.0)]);
         }
         Icon::Download => {
             pen.line(&[(12.0, 3.5), (12.0, 15.0)]);

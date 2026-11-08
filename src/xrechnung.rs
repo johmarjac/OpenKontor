@@ -354,7 +354,11 @@ pub fn build(data: &Data, doc: &Document, profile: Profile) -> Result<String, Ve
 
     push("    <ram:ApplicableHeaderTradeSettlement>");
     push(&format!("      <ram:PaymentReference>{}</ram:PaymentReference>", esc(&doc.number)));
-    push("      <ram:InvoiceCurrencyCode>EUR</ram:InvoiceCurrencyCode>");
+    // Another currency also names euro as the tax currency (BR-53, BT-6).
+    if doc.is_foreign() {
+        push("      <ram:TaxCurrencyCode>EUR</ram:TaxCurrencyCode>");
+    }
+    push(&format!("      <ram:InvoiceCurrencyCode>{}</ram:InvoiceCurrencyCode>", esc(doc.currency())));
     let mut means = format!(
         "      <ram:SpecifiedTradeSettlementPaymentMeans><ram:TypeCode>58</ram:TypeCode><ram:PayeePartyCreditorFinancialAccount><ram:IBANID>{}</ram:IBANID><ram:AccountName>{}</ram:AccountName></ram:PayeePartyCreditorFinancialAccount>",
         esc(&c.iban.replace(' ', "")),
@@ -407,7 +411,10 @@ pub fn build(data: &Data, doc: &Document, profile: Profile) -> Result<String, Ve
     let line_total: Cents = f.lines.iter().map(|(_, n)| n).sum();
     push(&format!("        <ram:LineTotalAmount>{}</ram:LineTotalAmount>", amount(line_total)));
     push(&format!("        <ram:TaxBasisTotalAmount>{}</ram:TaxBasisTotalAmount>", amount(f.net)));
-    push(&format!("        <ram:TaxTotalAmount currencyID=\"EUR\">{}</ram:TaxTotalAmount>", amount(f.tax)));
+    push(&format!("        <ram:TaxTotalAmount currencyID=\"{}\">{}</ram:TaxTotalAmount>", esc(doc.currency()), amount(f.tax)));
+    if doc.is_foreign() {
+        push(&format!("        <ram:TaxTotalAmount currencyID=\"EUR\">{}</ram:TaxTotalAmount>", amount(doc.to_eur(f.tax as Cents).abs())));
+    }
     push(&format!("        <ram:GrandTotalAmount>{}</ram:GrandTotalAmount>", amount(f.gross)));
     push(&format!("        <ram:DuePayableAmount>{}</ram:DuePayableAmount>", amount(f.gross)));
     push("      </ram:SpecifiedTradeSettlementHeaderMonetarySummation>");
@@ -544,6 +551,12 @@ mod tests {
             d.vat_case = case;
             std::fs::write(format!("{dir}/{name}.xml"), build(&eu, &d, Profile::XRechnung).unwrap()).unwrap();
         }
+        // An invoice in US dollars with German VAT: the VAT is also given in euros.
+        let mut usd = doc.clone();
+        usd.currency = "USD".into();
+        usd.exchange_rate = 1.0832;
+        std::fs::write(format!("{dir}/usd.xml"), build(&data, &usd, Profile::XRechnung).unwrap()).unwrap();
+        std::fs::write(format!("{dir}/usd.pdf"), crate::pdf::zugferd_pdf(&data, &usd).unwrap()).unwrap();
         // Advance invoice and final invoice with the deduction.
         let mut advance = doc.clone();
         advance.part = InvoicePart::Abschlag;

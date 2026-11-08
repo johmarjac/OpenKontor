@@ -107,7 +107,8 @@ pub fn afa_by_category(data: &Data, year: i32) -> Vec<(String, Cents)> {
 // ---- Chart of accounts -------------------------------------------------------------
 
 /// SKR 03 → SKR 04 for the accounts OpenKontor uses.
-const SKR04: [(&str, &str); 52] = [
+const SKR04: [(&str, &str); 54] = [
+    ("2660", "4840"), ("2150", "6880"),
     ("8400", "4400"), ("8300", "4300"), ("8195", "4185"), ("8120", "4120"), ("8125", "4125"),
     ("8336", "4336"), ("8338", "4338"), ("2700", "4830"), ("8736", "4736"), ("1890", "2180"),
     ("1800", "2100"), ("3400", "5400"), ("4120", "6020"), ("4210", "6310"), ("4240", "6325"),
@@ -154,6 +155,8 @@ pub fn account_name(skr03: &str) -> String {
         "1776" => "Umsatzsteuer 19 %",
         "1787" => "Umsatzsteuer § 13b UStG",
         "8736" => "Gewährte Skonti",
+        "2660" => "Erträge aus Kursdifferenzen",
+        "2150" => "Aufwendungen aus Kursdifferenzen",
         "0800" => "Gezeichnetes Kapital",
         "0880" => "Eigenkapital",
         "9000" => "Saldenvorträge",
@@ -264,8 +267,8 @@ pub fn journal(data: &Data, from: NaiveDate, to: NaiveDate) -> Vec<Posting> {
                     .income_category()
                     .filter(|_| !small)
                     .unwrap_or_else(|| income_category_for_rate(*rate, small));
-                push(d.date, "1400", &account_in(Chart::Skr03, revenue), *net, &text, &d.number);
-                push(d.date, "1400", output_tax_account(*rate), *tax, &text, &d.number);
+                push(d.date, "1400", &account_in(Chart::Skr03, revenue), d.to_eur(*net), &text, &d.number);
+                push(d.date, "1400", output_tax_account(*rate), d.to_eur(*tax), &text, &d.number);
             }
         }
     }
@@ -324,10 +327,26 @@ pub fn journal(data: &Data, from: NaiveDate, to: NaiveDate) -> Vec<Posting> {
             for p in d.effective_payments(small).iter().filter(|p| p.discount != 0 && in_range(p.date)) {
                 let text = format!("Skonto {} {}", d.kind.name(), d.number);
                 for (rate, (net, tax)) in &t.by_rate {
-                    let share = |v: Cents| (v as f64 * p.discount as f64 / t.gross as f64).round() as Cents;
+                    let share = |v: Cents| d.to_eur((v as f64 * p.discount as f64 / t.gross as f64).round() as Cents);
                     push(p.date, "8736", "1400", share(*net), &text, &d.number);
                     push(p.date, output_tax_account(*rate), "1400", share(*tax), &text, &d.number);
                 }
+            }
+        }
+    }
+
+    // Documents in another currency: what arrived in euros differs from the receivable.
+    if bilanz {
+        for d in data.documents.iter().filter(|d| d.kind.is_billing() && d.is_foreign() && d.status == DocStatus::Bezahlt) {
+            let pays = d.effective_payments(small);
+            let Some(last) = pays.iter().map(|p| p.date).max().filter(|day| in_range(*day)) else { continue };
+            let received: Cents = pays.iter().map(|p| p.eur.unwrap_or_else(|| d.to_eur(p.amount)) + d.to_eur(p.discount)).sum();
+            let diff = received - d.to_eur(d.totals(small).gross);
+            let text = format!("Kursdifferenz {} {}", d.kind.name(), d.number);
+            if diff > 0 {
+                push(last, "1400", "2660", diff, &text, &d.number);
+            } else if diff < 0 {
+                push(last, "2150", "1400", -diff, &text, &d.number);
             }
         }
     }
@@ -490,6 +509,78 @@ pub fn euer_form(data: &Data, year: i32) -> EuerForm {
     f
 }
 
+// ---- Cash-flow forecast (Liquiditätsvorschau) --------------------------------------------
+
+/// One week of the forecast.
+#[derive(Clone, Debug, Default)]
+pub struct ForecastWeek {
+    pub start: NaiveDate,
+    pub inflow: Cents,
+    pub outflow: Cents,
+    /// Money at the end of the week.
+    pub balance: Cents,
+    /// What makes up the week: (text, amount in euros, positive = in).
+    pub items: Vec<(String, Cents)>,
+}
+
+/// Expected money over the next weeks: open invoices by due date, open supplier receipts,
+/// recurring invoices and the average running expenses of the last three months.
+pub fn forecast(data: &Data, start_balance: Cents, from: NaiveDate, weeks: usize) -> Vec<ForecastWeek> {
+    let small = data.company.small_business;
+    let monday = from - chrono::Duration::days(from.weekday().num_days_from_monday() as i64);
+    let mut out: Vec<ForecastWeek> =
+        (0..weeks).map(|i| ForecastWeek { start: monday + chrono::Duration::weeks(i as i64), ..Default::default() }).collect();
+    let end = monday + chrono::Duration::weeks(weeks as i64);
+    let mut add = |day: NaiveDate, text: String, amount: Cents| {
+        if amount == 0 || day >= end {
+            return;
+        }
+        // Everything overdue is expected in the first week.
+        let i = if day < monday { 0 } else { ((day - monday).num_days() / 7) as usize };
+        let w = &mut out[i.min(weeks - 1)];
+        if amount > 0 { w.inflow += amount } else { w.outflow -= amount }
+        w.items.push((text, amount));
+    };
+    for d in data.documents.iter().filter(|d| d.kind.is_billing() && d.status == DocStatus::Offen) {
+        let open = d.to_eur(d.open_amount(small));
+        add(d.due_date(), format!("{} {} – {}", d.kind.name(), d.number, data.contact_name(d.contact_id)), open);
+    }
+    for r in data.receipts.iter().filter(|r| r.status == ReceiptStatus::Neu && r.gross > 0) {
+        let paid = data.bank.iter().any(|t| t.link == Some(BankLink::Receipt(r.id)));
+        if !paid {
+            let day = r.due.or(r.date.map(|d| d + chrono::Duration::days(14))).unwrap_or(from);
+            add(day, format!("Eingangsbeleg {} {}", r.supplier, r.number), -r.gross);
+        }
+    }
+    for rec in data.recurring.iter().filter(|r| r.active) {
+        let mut day = rec.next_date;
+        let gross = rec.template.to_eur(rec.template.totals(small).gross);
+        while day < end && rec.until.is_none_or(|u| day <= u) {
+            add(day + chrono::Duration::days(rec.template.due_days as i64), format!("Wiederkehrend: {}", rec.name), gross);
+            day = day.checked_add_months(chrono::Months::new(rec.every_months.max(1))).unwrap_or(end);
+        }
+    }
+    // Running costs: average of the expenses (without fixed assets) of the last 90 days.
+    let since = from - chrono::Duration::days(90);
+    let spent: Cents = data
+        .bookings
+        .iter()
+        .filter(|b| b.kind == BookingKind::Ausgabe && b.date >= since && b.date < from && b.category != ASSET_CATEGORY && b.receipt_id.is_none())
+        .map(|b| b.gross)
+        .sum();
+    let per_week = spent * 7 / 90;
+    let mut balance = start_balance;
+    for w in out.iter_mut() {
+        if per_week > 0 {
+            w.outflow += per_week;
+            w.items.push(("Laufende Ausgaben (Durchschnitt)".into(), -per_week));
+        }
+        balance += w.inflow - w.outflow;
+        w.balance = balance;
+    }
+    out
+}
+
 // ---- EU sales list (Zusammenfassende Meldung) ---------------------------------------------
 
 /// One line of the EU sales list.
@@ -521,7 +612,7 @@ pub fn zm_report(data: &Data, from: NaiveDate, to: NaiveDate) -> Vec<ZmLine> {
         if vat_id.len() < 3 {
             continue;
         }
-        *m.entry((vat_id, kind)).or_default() += d.totals(small).net;
+        *m.entry((vat_id, kind)).or_default() += d.to_eur(d.totals(small).net);
     }
     m.into_iter()
         .map(|((id, kind), amount)| ZmLine { country: id[..2].to_string(), vat_id: id[2..].to_string(), amount, kind })
@@ -573,6 +664,51 @@ mod tests {
         let tb = trial_balance(&journal(&data, NaiveDate::from_ymd_opt(year, 1, 1).unwrap(), today()));
         let (d, c): (Cents, Cents) = tb.values().fold((0, 0), |a, v| (a.0 + v.0, a.1 + v.1));
         assert_eq!(d, c);
+    }
+
+    #[test]
+    fn foreign_currency_and_projects() {
+        let mut data = sample_data();
+        data.company.accounting = Accounting::Bilanz;
+        let cid = data.contacts[0].id;
+        // An invoice over 1,000.00 USD at 1.25 USD per euro (= 800 €), no VAT (export).
+        let doc = Document {
+            contact_id: Some(cid),
+            currency: "USD".into(),
+            exchange_rate: 1.25,
+            vat_case: VatCase::DrittlandLeistung,
+            lines: vec![Line { text: "Consulting".into(), qty: 1.0, price_net: 100_000, vat: 19, ..Line::default() }],
+            ..Document::default()
+        };
+        let id = data.apply(Op::SaveDocument(doc), "t").unwrap().unwrap();
+        data.apply(Op::FinalizeDocument(id), "t").unwrap();
+        // 790 € arrive at the bank: paid in full, 10 € exchange loss.
+        data.apply(Op::ImportBank(vec![BankTx { date: today(), amount: 79_000, name: "US Client".into(), reference: "fx".into(), ..BankTx::default() }]), "t").unwrap();
+        let tx = data.bank.iter().find(|t| t.reference == "fx").unwrap().id;
+        data.apply(Op::AssignBank(tx, BankAssign::Document { id, discount: false }), "t").unwrap();
+        let d = data.documents.iter().find(|d| d.id == id).unwrap();
+        assert_eq!(d.status, DocStatus::Bezahlt);
+        let booked: Cents = data.bookings.iter().filter(|b| b.doc_id == Some(id)).map(|b| b.gross).sum();
+        assert_eq!(booked, 79_000);
+        let year = today().year();
+        let j = journal(&data, NaiveDate::from_ymd_opt(year, 1, 1).unwrap(), NaiveDate::from_ymd_opt(year, 12, 31).unwrap());
+        assert!(j.iter().any(|p| p.debit == "2150" && p.amount == 1_000), "Kursverlust fehlt");
+        let s = statements(&data, year);
+        assert_eq!(s.total_assets, s.total_liabilities);
+        assert_eq!(fmt_money_cur(crate::i18n::Lang::De, 123_456, "USD"), "1.234,56 USD");
+        // Hours on a project become a draft invoice; deleting the draft frees them again.
+        let pid = data.apply(Op::SaveProject(Project { name: "Website".into(), contact_id: Some(cid), rate: 8_000, ..Project::default() }), "t").unwrap().unwrap();
+        let t1 = data.apply(Op::SaveTime(TimeEntry { project_id: pid, hours: 2.5, text: "Entwurf".into(), ..TimeEntry::default() }), "t").unwrap().unwrap();
+        let inv = data.apply(Op::BillTimes(pid, vec![t1]), "t").unwrap().unwrap();
+        let d = data.documents.iter().find(|d| d.id == inv).unwrap();
+        assert_eq!(d.totals(false).net, 20_000);
+        assert!(data.apply(Op::DeleteTime(t1), "t").is_err());
+        data.apply(Op::DeleteDocument(inv), "t").unwrap();
+        assert!(data.times[0].invoice_id.is_none());
+        // The forecast sees the open invoices.
+        let f = forecast(&data, 100_000, today(), 8);
+        assert_eq!(f.len(), 8);
+        assert!(f.iter().map(|w| w.inflow).sum::<Cents>() > 0);
     }
 
     #[test]

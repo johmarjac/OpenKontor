@@ -65,6 +65,24 @@ pub fn open_file(path: &std::path::Path) {
     let _ = std::process::Command::new("xdg-open").arg(path).spawn();
 }
 
+/// Today's reference rate of the European Central Bank: units of `currency` for one euro.
+pub fn ecb_rate(currency: &str) -> Result<f64, String> {
+    let config = ureq::Agent::config_builder().timeout_global(Some(std::time::Duration::from_secs(10))).build();
+    let xml = ureq::Agent::new_with_config(config)
+        .get("https://www.ecb.europa.eu/stats/eurofxref/eurofxref-daily.xml")
+        .call()
+        .map_err(|e| format!("EZB nicht erreichbar ({e})."))?
+        .body_mut()
+        .read_to_string()
+        .map_err(|e| e.to_string())?;
+    let needle = format!("currency='{}' rate='", currency.trim());
+    xml.split(&needle)
+        .nth(1)
+        .and_then(|r| r.split('\'').next())
+        .and_then(|v| v.parse().ok())
+        .ok_or_else(|| format!("Für {currency} veröffentlicht die EZB keinen Kurs."))
+}
+
 /// Where new versions are published.
 pub const RELEASES_API: &str = "https://api.github.com/repos/johmarjac/OpenKontor/releases/latest";
 
