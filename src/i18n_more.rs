@@ -472,6 +472,11 @@ const TEXTS_MORE: &[(&str, &str)] = &[
     ("Nur Belege einreichen (z. B. per Handy)", "Only hand in receipts (e.g. by phone)"),
     ("Dafür fehlen Ihnen die Rechte. Bitte wenden Sie sich an den Administrator.", "You lack the rights for this. Please contact the administrator."),
     ("Dafür fehlen Ihnen die Rechte.", "You lack the rights for this."),
+    // Staying signed in
+    ("Beim nächsten Start merken", "Remember at next start"),
+    ("OpenKontor verbindet sich beim nächsten Start von selbst wieder mit diesem Server bzw. öffnet den Einzelplatz. Das Passwort wird nicht gespeichert; „Abmelden“ beendet das.", "OpenKontor reconnects to this server (or opens the single workplace) by itself at the next start. The password is not stored; “Sign out” ends this."),
+    ("Verbinde wieder mit {} …", "Reconnecting to {} …"),
+    ("Die gespeicherte Anmeldung ist abgelaufen. Bitte neu anmelden.", "The remembered sign-in has expired. Please sign in again."),
     // Mail kinds
     ("Hiermit bestellen wir gemäß beiliegender Bestellung {} vom {}.", "We hereby order as per the enclosed purchase order {} dated {}."),
 ];

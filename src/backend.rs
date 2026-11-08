@@ -27,6 +27,21 @@ pub struct ClientConfig {
     pub tenant: String,
     /// Look on GitHub for a newer version at start.
     pub check_updates: bool,
+    /// "Beim nächsten Start merken": open the last server or single workplace at start.
+    pub remember: bool,
+    /// What to open at the next start.
+    pub resume: Resume,
+    /// Token the server gave for signing in again (not the password).
+    pub remember_token: String,
+}
+
+/// What was open when the program was closed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Resume {
+    #[default]
+    Nothing,
+    Local,
+    Server,
 }
 
 impl Default for ClientConfig {
@@ -38,6 +53,9 @@ impl Default for ClientConfig {
             language: None,
             tenant: String::new(),
             check_updates: true,
+            remember: true,
+            resume: Resume::Nothing,
+            remember_token: String::new(),
         }
     }
 }
@@ -62,7 +80,13 @@ impl ClientConfig {
             let _ = std::fs::create_dir_all(d);
         }
         if let Ok(t) = serde_json::to_string_pretty(self) {
-            let _ = std::fs::write(p, t);
+            let _ = std::fs::write(&p, t);
+            // The file may hold a sign-in token: readable only by this user.
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600));
+            }
         }
     }
 }
@@ -77,6 +101,8 @@ pub struct Remote {
     pub sso_enabled: bool,
     /// Two-factor sign-in is switched on for this user.
     pub totp_enabled: bool,
+    /// Given by the server when the user asked to stay signed in.
+    pub remember_token: String,
     pub tenant: String,
     pub tenant_name: String,
     agent: ureq::Agent,
@@ -159,6 +185,7 @@ impl Remote {
         password: &str,
         code: &str,
         tenant: &str,
+        remember: bool,
         ctx: eframe::egui::Context,
     ) -> Result<(Remote, Data), String> {
         let base = normalize_url(url);
@@ -168,6 +195,7 @@ impl Remote {
             password: password.into(),
             code: code.into(),
             tenant: tenant.into(),
+            remember,
         }))?;
         Self::start(base, agent, login, ctx)
     }
@@ -177,6 +205,7 @@ impl Remote {
         url: &str,
         proof: &crate::sso_client::SsoResult,
         tenant: &str,
+        remember: bool,
         ctx: eframe::egui::Context,
     ) -> Result<(Remote, Data), String> {
         let base = normalize_url(url);
@@ -186,9 +215,33 @@ impl Remote {
                 id_token: proof.id_token.clone(),
                 nonce: proof.nonce.clone(),
                 tenant: tenant.into(),
+                remember,
             },
         ))?;
         Self::start(base, agent, login, ctx)
+    }
+
+    /// Signs in again with the token of a remembered workplace.
+    pub fn connect_token(
+        url: &str,
+        user: &str,
+        token: &str,
+        tenant: &str,
+        ctx: eframe::egui::Context,
+    ) -> Result<(Remote, Data), String> {
+        let base = normalize_url(url);
+        let agent = make_agent();
+        let login: LoginReply = read(agent.post(format!("{base}/api/login/token")).send_json(
+            crate::server::TokenLoginRequest { user: user.into(), token: token.into(), tenant: tenant.into() },
+        ))?;
+        Self::start(base, agent, login, ctx)
+    }
+
+    /// Tells the server to forget this workplace's sign-in token.
+    pub fn forget(url: &str, user: &str, token: &str, tenant: &str) {
+        let _ = make_agent().post(format!("{}/api/logout", normalize_url(url))).send_json(
+            crate::server::TokenLoginRequest { user: user.into(), token: token.into(), tenant: tenant.into() },
+        );
     }
 
     /// Fetches the data after signing in and starts watching for changes.
@@ -247,6 +300,7 @@ impl Remote {
                 server_name: login.server_name,
                 sso_enabled: login.sso_enabled,
                 totp_enabled: login.totp_enabled,
+                remember_token: login.remember_token,
                 tenant: login.tenant,
                 tenant_name: login.tenant_name,
                 agent,

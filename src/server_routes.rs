@@ -16,6 +16,8 @@ pub(super) fn route(state: &mut State, method: &Method, path: &str, query: &str,
         }
         (&Method::Post, "/api/login/sso") => return sso_login(state, body),
         (&Method::Post, "/api/login") => return login(state, body),
+        (&Method::Post, "/api/login/token") => return token_login(state, body),
+        (&Method::Post, "/api/logout") => return forget(state, body),
         _ => {}
     }
 

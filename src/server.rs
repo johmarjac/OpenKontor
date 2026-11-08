@@ -79,6 +79,24 @@ pub struct User {
     pub hash: String,
     /// Secret for sign-in codes from an authenticator app (base32); empty = off.
     pub totp: String,
+    /// Workplaces that stay signed in ("beim nächsten Start merken"). Only hashes are kept;
+    /// a new password removes them all.
+    pub remembered: Vec<Remembered>,
+}
+
+/// A workplace that may sign in again without the password, until the date.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Remembered {
+    pub hash: String,
+    pub until: chrono::NaiveDate,
+}
+
+/// How long a workplace stays signed in without being used.
+const REMEMBER_DAYS: i64 = 30;
+
+fn token_hash(token: &str) -> String {
+    Sha256::digest(token.as_bytes()).iter().map(|b| format!("{b:02x}")).collect()
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -105,6 +123,18 @@ pub struct LoginRequest {
     /// Company (Mandant) to work in; empty = the first one.
     #[serde(default)]
     pub tenant: String,
+    /// Stay signed in on this workplace.
+    #[serde(default)]
+    pub remember: bool,
+}
+
+/// Signing in again with the token of a remembered workplace.
+#[derive(Serialize, Deserialize)]
+pub struct TokenLoginRequest {
+    pub user: String,
+    pub token: String,
+    #[serde(default)]
+    pub tenant: String,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -122,6 +152,9 @@ pub struct LoginReply {
     pub tenant: String,
     #[serde(default)]
     pub tenant_name: String,
+    /// Token to sign in again at the next start (only when asked to remember).
+    #[serde(default)]
+    pub remember_token: String,
 }
 
 /// Mail server settings as an administrator sees them: without the password.
@@ -137,6 +170,8 @@ pub struct SsoLoginRequest {
     pub nonce: String,
     #[serde(default)]
     pub tenant: String,
+    #[serde(default)]
+    pub remember: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -225,7 +260,7 @@ fn hash_password(salt: &str, password: &str) -> String {
 
 fn make_user(name: &str, role: Role, password: &str) -> User {
     let salt = random_hex(16);
-    User { name: name.to_string(), role, hash: hash_password(&salt, password), salt, totp: String::new() }
+    User { name: name.to_string(), role, hash: hash_password(&salt, password), salt, ..User::default() }
 }
 
 // ---- Server -------------------------------------------------------------------
@@ -717,7 +752,7 @@ fn login(state: &mut State, body: &str) -> Reply {
                 }
             }
             state.failures.remove(&req.user.to_lowercase());
-            open_session(state, ti, u.name, u.role)
+            open_session(state, ti, u.name, u.role, req.remember)
         }
         _ => {
             note_failure(state, &req.user);
@@ -726,14 +761,81 @@ fn login(state: &mut State, body: &str) -> Reply {
     }
 }
 
+/// Signing in again from a remembered workplace. The token stands for password and code.
+fn token_login(state: &mut State, body: &str) -> Reply {
+    let Ok(req) = serde_json::from_str::<TokenLoginRequest>(body) else {
+        return error(400, "Ungültige Anfrage.");
+    };
+    let Some(ti) = tenant_index(state, &req.tenant) else {
+        return error(404, "Diese Firma gibt es auf dem Server nicht.");
+    };
+    if locked_out(state, &req.user) {
+        return error(429, "Zu viele falsche Anmeldungen. Bitte in fünf Minuten erneut versuchen.");
+    }
+    let today = crate::model::today();
+    let hash = token_hash(&req.token);
+    let t = &mut state.tenants[ti];
+    let Some(u) = t.stored.users.iter_mut().find(|u| u.name.eq_ignore_ascii_case(req.user.trim())) else {
+        note_failure(state, &req.user);
+        return error(401, "Die gespeicherte Anmeldung ist abgelaufen. Bitte neu anmelden.");
+    };
+    let Some(r) = u.remembered.iter_mut().find(|r| r.hash == hash && r.until >= today) else {
+        note_failure(state, &req.user);
+        return error(401, "Die gespeicherte Anmeldung ist abgelaufen. Bitte neu anmelden.");
+    };
+    // Each use keeps the workplace signed in for another month.
+    r.until = today + chrono::Duration::days(REMEMBER_DAYS);
+    let (name, role) = (u.name.clone(), u.role);
+    let _ = t.save(Change::Users);
+    open_session(state, ti, name, role, false)
+}
+
+/// Forgets a remembered workplace (on "Abmelden").
+fn forget(state: &mut State, body: &str) -> Reply {
+    let Ok(req) = serde_json::from_str::<TokenLoginRequest>(body) else {
+        return error(400, "Ungültige Anfrage.");
+    };
+    let Some(ti) = tenant_index(state, &req.tenant) else {
+        return error(404, "Diese Firma gibt es auf dem Server nicht.");
+    };
+    let hash = token_hash(&req.token);
+    let t = &mut state.tenants[ti];
+    let mut changed = false;
+    for u in t.stored.users.iter_mut().filter(|u| u.name.eq_ignore_ascii_case(req.user.trim())) {
+        let before = u.remembered.len();
+        u.remembered.retain(|r| r.hash != hash);
+        changed |= u.remembered.len() != before;
+    }
+    if changed {
+        let _ = t.save(Change::Users);
+    }
+    json_response(200, &serde_json::json!({ "ok": true }))
+}
+
 /// A user who signs in only with Microsoft 365: no password at all.
 fn sso_user(name: &str, role: Role) -> User {
     User { name: name.to_string(), role, ..User::default() }
 }
 
-fn open_session(state: &mut State, tenant: usize, name: String, role: Role) -> Reply {
+fn open_session(state: &mut State, tenant: usize, name: String, role: Role, remember: bool) -> Reply {
     let token = random_hex(24);
     state.sessions.insert(token.clone(), Session { user: name.clone(), role, tenant });
+    let mut remember_token = String::new();
+    if remember {
+        let today = crate::model::today();
+        let t = &mut state.tenants[tenant];
+        if let Some(u) = t.stored.users.iter_mut().find(|u| u.name == name) {
+            remember_token = random_hex(32);
+            u.remembered.retain(|r| r.until >= today);
+            u.remembered.push(Remembered { hash: token_hash(&remember_token), until: today + chrono::Duration::days(REMEMBER_DAYS) });
+            // At most ten workplaces per user; the oldest are forgotten.
+            let excess = u.remembered.len().saturating_sub(10);
+            u.remembered.drain(..excess);
+            if t.save(Change::Users).is_err() {
+                remember_token.clear();
+            }
+        }
+    }
     let t = &state.tenants[tenant];
     let totp_enabled = t.stored.users.iter().any(|u| u.name == name && !u.totp.is_empty());
     json_response(
@@ -747,6 +849,7 @@ fn open_session(state: &mut State, tenant: usize, name: String, role: Role) -> R
             totp_enabled,
             tenant: t.id.clone(),
             tenant_name: t.name(),
+            remember_token,
         },
     )
 }
@@ -769,7 +872,7 @@ fn sso_login(state: &mut State, body: &str) -> Reply {
     let auto_role = verifier.cfg.auto_role;
     if let Some(u) = state.tenants[ti].stored.users.iter().find(|u| u.name.eq_ignore_ascii_case(&identity.username)) {
         let (name, role) = (u.name.clone(), u.role);
-        return open_session(state, ti, name, role);
+        return open_session(state, ti, name, role, req.remember);
     }
     let Some(role) = auto_role else {
         return error(
@@ -788,7 +891,7 @@ fn sso_login(state: &mut State, body: &str) -> Reply {
         t.stored.users = before;
         return error(500, &format!("Speichern fehlgeschlagen: {e}"));
     }
-    open_session(state, ti, identity.username, role)
+    open_session(state, ti, identity.username, role, req.remember)
 }
 
 fn users_admins(users: &[User]) -> usize {

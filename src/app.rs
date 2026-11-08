@@ -245,6 +245,8 @@ pub struct App {
     server_info: Option<crate::backend::ServerInfo>,
     info_for: String,
     info_rx: Option<Receiver<(String, Result<crate::backend::ServerInfo, String>)>>,
+    /// Signing in again at start with the remembered workplace (in the background).
+    resume_rx: Option<Receiver<Result<(Remote, Data), String>>>,
     /// A newer version on GitHub: (version, address of the download page).
     update: Option<(String, String)>,
     update_rx: Option<Receiver<Option<(String, String)>>>,
@@ -333,6 +335,7 @@ impl App {
             info_rx: None,
             update: None,
             update_rx: None,
+            resume_rx: None,
             bank: Default::default(),
             books: Default::default(),
             stock: Default::default(),
@@ -342,6 +345,25 @@ impl App {
         };
         if app.shot.is_none() && app.cfg.check_updates {
             app.update_rx = Some(crate::export::check_for_update());
+        }
+        // "Beim nächsten Start merken": open what was open last time.
+        if app.shot.is_none() && app.cfg.remember {
+            match app.cfg.resume {
+                crate::backend::Resume::Local => app.open_local(),
+                crate::backend::Resume::Server if !app.cfg.remember_token.is_empty() => {
+                    let (url, user, token, tenant) =
+                        (app.cfg.server_url.clone(), app.cfg.user.clone(), app.cfg.remember_token.clone(), app.cfg.tenant.clone());
+                    let ctx = cc.egui_ctx.clone();
+                    let (tx, rx) = channel();
+                    std::thread::spawn(move || {
+                        let r = Remote::connect_token(&url, &user, &token, &tenant, ctx.clone());
+                        let _ = tx.send(r);
+                        ctx.request_repaint();
+                    });
+                    app.resume_rx = Some(rx);
+                }
+                _ => {}
+            }
         }
         if app.shot.is_some() {
             // Pictures always show the example company, unless the sign-in screen is asked for.
@@ -409,7 +431,46 @@ impl App {
         }
     }
 
+    /// Notes what to open at the next start.
+    fn remember_session(&mut self, resume: crate::backend::Resume, token: &str) {
+        if self.cfg.remember {
+            self.cfg.resume = resume;
+            if !token.is_empty() {
+                self.cfg.remember_token = token.to_string();
+            }
+        } else {
+            self.cfg.resume = crate::backend::Resume::Nothing;
+            self.cfg.remember_token.clear();
+        }
+        self.cfg.save();
+    }
+
+    /// Signed in again with the remembered workplace (or not).
+    fn finish_resume(&mut self, result: Result<(Remote, Data), String>) {
+        match result {
+            Ok((remote, data)) => {
+                self.data = data;
+                self.info(tf!("Angemeldet bei {} als {}", remote.tenant_name, remote.user));
+                self.backend = Backend::Remote(Box::new(remote));
+                self.screen = Screen::Main;
+                self.section = self.first_section();
+                self.connect_error = None;
+            }
+            Err(e) => {
+                // An expired sign-in is forgotten; an unreachable server is tried again next time.
+                if e.contains("abgelaufen") {
+                    self.cfg.remember_token.clear();
+                    self.cfg.resume = crate::backend::Resume::Nothing;
+                    self.cfg.save();
+                }
+                self.connect_error = Some(tr(&e));
+            }
+        }
+    }
+
     fn open_demo(&mut self) {
+        self.cfg.resume = crate::backend::Resume::Nothing;
+        self.cfg.save();
         self.data = sample_data();
         self.backend = Backend::Demo;
         // Two example supplier invoices for the inbox: an e-invoice and a PDF.
@@ -426,13 +487,14 @@ impl App {
         self.screen = Screen::Main;
         self.section = Section::Start;
         self.cfg.use_server = false;
-        self.cfg.save();
+        self.remember_session(crate::backend::Resume::Local, "");
     }
 
     fn connect(&mut self, ctx: &egui::Context) {
         let tenant = self.cfg.tenant.clone();
-        match Remote::connect(&self.cfg.server_url, &self.cfg.user, &self.password, &self.totp_code, &tenant, ctx.clone()) {
+        match Remote::connect(&self.cfg.server_url, &self.cfg.user, &self.password, &self.totp_code, &tenant, self.cfg.remember, ctx.clone()) {
             Ok((remote, data)) => {
+                let token = remote.remember_token.clone();
                 self.data = data;
                 self.info(tf!("Angemeldet bei {} als {}", remote.tenant_name, remote.user));
                 self.backend = Backend::Remote(Box::new(remote));
@@ -443,7 +505,7 @@ impl App {
                 self.need_code = false;
                 self.connect_error = None;
                 self.cfg.use_server = true;
-                self.cfg.save();
+                self.remember_session(crate::backend::Resume::Server, &token);
             }
             Err(e) => {
                 if let Some(msg) = e.strip_prefix(crate::backend::NEED_CODE) {
@@ -519,9 +581,11 @@ impl App {
 
     fn finish_sso(&mut self, ctx: &egui::Context, result: Result<crate::sso_client::SsoResult, String>) {
         let tenant = self.cfg.tenant.clone();
-        let connected = result.and_then(|proof| Remote::connect_sso(&self.cfg.server_url, &proof, &tenant, ctx.clone()));
+        let remember = self.cfg.remember;
+        let connected = result.and_then(|proof| Remote::connect_sso(&self.cfg.server_url, &proof, &tenant, remember, ctx.clone()));
         match connected {
             Ok((remote, data)) => {
+                let token = remote.remember_token.clone();
                 self.data = data;
                 self.info(tf!("Angemeldet bei {} als {}", remote.tenant_name, remote.user));
                 self.backend = Backend::Remote(Box::new(remote));
@@ -529,7 +593,7 @@ impl App {
                 self.section = self.first_section();
                 self.connect_error = None;
                 self.cfg.use_server = true;
-                self.cfg.save();
+                self.remember_session(crate::backend::Resume::Server, &token);
             }
             Err(e) => self.connect_error = Some(tr(&e)),
         }
@@ -556,6 +620,16 @@ impl App {
     }
 
     fn sign_out(&mut self) {
+        // "Abmelden" means: do not sign in by yourself next time.
+        if let Backend::Remote(r) = &self.backend
+            && !self.cfg.remember_token.is_empty()
+        {
+            let (url, user, token, tenant) = (r.base.clone(), r.user.clone(), self.cfg.remember_token.clone(), r.tenant.clone());
+            std::thread::spawn(move || Remote::forget(&url, &user, &token, &tenant));
+        }
+        self.cfg.resume = crate::backend::Resume::Nothing;
+        self.cfg.remember_token.clear();
+        self.cfg.save();
         self.backend = Backend::Demo;
         self.data = Data::default();
         self.screen = Screen::Connect;
@@ -772,6 +846,12 @@ impl eframe::App for App {
             self.update_rx = None;
             self.update = r;
         }
+        if let Some(rx) = &self.resume_rx
+            && let Ok(r) = rx.try_recv()
+        {
+            self.resume_rx = None;
+            self.finish_resume(r);
+        }
         if self.screen == Screen::Connect {
             self.probe_server(ctx);
         }
@@ -914,8 +994,24 @@ impl App {
                                         ui.end_row();
                                     }
                                 });
+                            if self.resume_rx.is_some() {
+                                ui.horizontal(|ui| {
+                                    ui.spinner();
+                                    ui.label(muted(tf!("Verbinde wieder mit {} …", self.cfg.server_url)));
+                                    if ui.button(t("Abbrechen")).clicked() {
+                                        self.resume_rx = None;
+                                    }
+                                });
+                            }
                             if let Some(e) = &self.connect_error {
                                 ui.label(RichText::new(e).color(RED));
+                            }
+                            if ui
+                                .checkbox(&mut self.cfg.remember, t("Beim nächsten Start merken"))
+                                .on_hover_text(t("OpenKontor verbindet sich beim nächsten Start von selbst wieder mit diesem Server bzw. öffnet den Einzelplatz. Das Passwort wird nicht gespeichert; „Abmelden“ beendet das."))
+                                .changed()
+                            {
+                                self.cfg.save();
                             }
                             ui.add_space(4.0);
                             ui.horizontal(|ui| {
@@ -986,6 +1082,9 @@ impl App {
                                     self.open_demo();
                                 }
                             });
+                            if ui.checkbox(&mut self.cfg.remember, t("Beim nächsten Start merken")).changed() {
+                                self.cfg.save();
+                            }
                         });
                     });
                 });
