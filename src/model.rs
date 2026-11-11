@@ -54,6 +54,9 @@ pub struct Company {
     pub next_purchase_no: u32,
     pub next_contact_no: u32,
     pub next_article_no: u32,
+    /// Number ranges by kind ("Rechnung", "Angebot" …, "Kunde", "Lieferant", "Artikel").
+    /// Kinds missing here follow the older settings above.
+    pub numbers: BTreeMap<String, NumberFormat>,
     /// Company logo printed on the letterhead.
     pub logo: Option<Logo>,
     /// DATEV consultant and client number for the export to the tax advisor.
@@ -68,6 +71,204 @@ pub struct Company {
     /// Balance of the business account on a day, as start of the cash-flow forecast.
     pub bank_balance: Cents,
     pub bank_balance_date: Option<NaiveDate>,
+}
+
+/// The date part of a number.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DatePart {
+    #[default]
+    Keine,
+    /// 2026
+    Jahr,
+    /// 26
+    JahrKurz,
+    /// 202611
+    JahrMonat,
+    /// 2611
+    JahrKurzMonat,
+}
+
+impl DatePart {
+    pub const ALL: [DatePart; 5] = [DatePart::Keine, DatePart::Jahr, DatePart::JahrKurz, DatePart::JahrMonat, DatePart::JahrKurzMonat];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            DatePart::Keine => "ohne Datum",
+            DatePart::Jahr => "Jahr (2026)",
+            DatePart::JahrKurz => "Jahr kurz (26)",
+            DatePart::JahrMonat => "Jahr und Monat (202611)",
+            DatePart::JahrKurzMonat => "Jahr kurz und Monat (2611)",
+        }
+    }
+
+    fn text(self, d: NaiveDate) -> String {
+        match self {
+            DatePart::Keine => String::new(),
+            DatePart::Jahr => d.format("%Y").to_string(),
+            DatePart::JahrKurz => d.format("%y").to_string(),
+            DatePart::JahrMonat => d.format("%Y%m").to_string(),
+            DatePart::JahrKurzMonat => d.format("%y%m").to_string(),
+        }
+    }
+
+    fn has_month(self) -> bool {
+        matches!(self, DatePart::JahrMonat | DatePart::JahrKurzMonat)
+    }
+}
+
+/// When the counter starts again at its start value.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Restart {
+    #[default]
+    Nie,
+    Jaehrlich,
+    Monatlich,
+}
+
+impl Restart {
+    pub const ALL: [Restart; 3] = [Restart::Nie, Restart::Jaehrlich, Restart::Monatlich];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Restart::Nie => "fortlaufend",
+            Restart::Jaehrlich => "jedes Jahr neu",
+            Restart::Monatlich => "jeden Monat neu",
+        }
+    }
+}
+
+/// How the numbers of one kind look, e.g. "RE-2026-0007" or "2611-042/K".
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct NumberFormat {
+    pub prefix: String,
+    pub date: DatePart,
+    /// Between date part and counter.
+    pub separator: String,
+    /// At least this many digits, filled with zeros (0 = as long as needed).
+    pub digits: u8,
+    pub suffix: String,
+    pub restart: Restart,
+    /// Where the counter begins (also after a restart).
+    pub start: u32,
+    pub next: u32,
+    /// The year or month the counter last counted in (for restarting).
+    pub period: String,
+}
+
+impl Default for NumberFormat {
+    fn default() -> Self {
+        Self {
+            prefix: String::new(),
+            date: DatePart::Jahr,
+            separator: "-".into(),
+            digits: 4,
+            suffix: String::new(),
+            restart: Restart::Nie,
+            start: 1,
+            next: 1,
+            period: String::new(),
+        }
+    }
+}
+
+impl NumberFormat {
+    fn period_key(&self, d: NaiveDate) -> String {
+        match self.restart {
+            Restart::Nie => String::new(),
+            Restart::Jaehrlich => d.format("%Y").to_string(),
+            Restart::Monatlich => d.format("%Y-%m").to_string(),
+        }
+    }
+
+    /// The counter the next number gets on this day.
+    pub fn next_for(&self, d: NaiveDate) -> u32 {
+        if self.restart != Restart::Nie && !self.period.is_empty() && self.period_key(d) != self.period {
+            self.start.max(1)
+        } else {
+            self.next.max(1)
+        }
+    }
+
+    pub fn render(&self, n: u32, d: NaiveDate) -> String {
+        let date = self.date.text(d);
+        let counter = format!("{:0width$}", n, width = self.digits as usize);
+        let middle = if date.is_empty() { counter } else { format!("{date}{}{counter}", self.separator) };
+        format!("{}{}{}", self.prefix, middle, self.suffix)
+    }
+
+    /// What the next number will look like.
+    pub fn preview(&self, d: NaiveDate) -> String {
+        self.render(self.next_for(d), d)
+    }
+
+    /// A restart without the matching date part would repeat numbers.
+    pub fn warning(&self) -> Option<&'static str> {
+        match self.restart {
+            Restart::Jaehrlich if self.date == DatePart::Keine => {
+                Some("Jedes Jahr neu beginnen geht nur mit Jahr in der Nummer – sonst gäbe es Nummern doppelt.")
+            }
+            Restart::Monatlich if !self.date.has_month() => {
+                Some("Jeden Monat neu beginnen geht nur mit Jahr und Monat in der Nummer – sonst gäbe es Nummern doppelt.")
+            }
+            _ => None,
+        }
+    }
+
+    /// Takes the next counter for a day and moves on.
+    fn take(&mut self, d: NaiveDate) -> u32 {
+        // A restart that would repeat numbers is not applied.
+        if self.warning().is_none() {
+            self.next = self.next_for(d);
+            self.period = self.period_key(d);
+        }
+        let n = self.next.max(1);
+        self.next = n + 1;
+        n
+    }
+}
+
+/// The kinds that have a number range, with their label.
+pub const NUMBER_KINDS: [(&str, &str); 9] = [
+    ("Rechnung", "Rechnungen"),
+    ("Gutschrift", "Gutschriften"),
+    ("Angebot", "Angebote"),
+    ("Auftragsbestätigung", "Auftragsbestätigungen"),
+    ("Lieferschein", "Lieferscheine"),
+    ("Bestellung", "Bestellungen"),
+    ("Kunde", "Kunden"),
+    ("Lieferant", "Lieferanten"),
+    ("Artikel", "Artikel"),
+];
+
+impl Company {
+    /// The number range of a kind; older settings are taken over where none is set yet.
+    pub fn number_format(&self, key: &str) -> NumberFormat {
+        if let Some(f) = self.numbers.get(key) {
+            return f.clone();
+        }
+        let doc = |prefix: &str, next: u32| NumberFormat { prefix: prefix.to_string(), next, ..NumberFormat::default() };
+        let plain = |prefix: &str, digits: u8, next: u32| NumberFormat {
+            prefix: prefix.to_string(),
+            date: DatePart::Keine,
+            digits,
+            next,
+            start: next.min(1),
+            ..NumberFormat::default()
+        };
+        match key {
+            "Rechnung" => doc(&self.invoice_prefix, self.next_invoice_no),
+            "Gutschrift" => doc(&self.credit_prefix, self.next_credit_no),
+            "Angebot" => doc(&self.offer_prefix, self.next_offer_no),
+            "Auftragsbestätigung" => doc(&self.order_prefix, self.next_order_no),
+            "Lieferschein" => doc(&self.delivery_prefix, self.next_delivery_no),
+            "Bestellung" => doc(&self.purchase_prefix, self.next_purchase_no),
+            // Customers and suppliers in the ranges DATEV uses (debtors 10000, creditors 70000).
+            "Kunde" => NumberFormat { start: 10001, ..plain("", 0, self.next_contact_no) },
+            "Lieferant" => NumberFormat { start: 70001, ..plain("", 0, 70001) },
+            _ => NumberFormat { start: 1, ..plain("A-", 4, self.next_article_no) },
+        }
+    }
 }
 
 /// A logo as plain RGB pixels (compressed, base64), ready to be placed in PDFs.
@@ -131,6 +332,7 @@ impl Default for Company {
             next_purchase_no: 1,
             next_contact_no: 10001,
             next_article_no: 1,
+            numbers: BTreeMap::new(),
             logo: None,
             datev_advisor: String::new(),
             datev_client: String::new(),
@@ -1468,7 +1670,7 @@ impl Data {
                 if c.id == 0 {
                     c.id = self.new_id();
                     if c.number.trim().is_empty() {
-                        c.number = self.next_contact_number();
+                        c.number = self.next_contact_number(c.kind);
                     }
                     let msg = format!("Kontakt {} angelegt", c.display_name());
                     let id = c.id;
@@ -1582,8 +1784,8 @@ impl Data {
                 {
                     return Err("Für EU-Geschäfte ohne Umsatzsteuer braucht die Rechnung die USt-IdNr. des Kunden und Ihre eigene.".into());
                 }
-                let (kind, year) = (d.kind, d.date.year());
-                let number = self.next_doc_number(kind, year);
+                let (kind, day) = (d.kind, d.date);
+                let number = self.next_doc_number(kind, day);
                 let d = &mut self.documents[i];
                 d.number = number.clone();
                 d.status = DocStatus::Offen;
@@ -1882,7 +2084,7 @@ impl Data {
                     }
                     c.id = self.new_id();
                     if c.number.trim().is_empty() {
-                        c.number = self.next_contact_number();
+                        c.number = self.next_contact_number(c.kind);
                     }
                     self.contacts.push(c);
                     added += 1;
@@ -2343,32 +2545,35 @@ impl Data {
         self.contact(contact_id).and_then(|c| c.einvoice).unwrap_or(self.company.einvoice_default)
     }
 
-    pub fn next_contact_number(&mut self) -> String {
-        let n = self.company.next_contact_no;
-        self.company.next_contact_no += 1;
-        n.to_string()
+    /// Hands out the next number of a range. A number that exists already is skipped,
+    /// so changing the range can never produce a number twice.
+    fn take_number(&mut self, key: &str, day: NaiveDate, taken: impl Fn(&Data, &str) -> bool) -> String {
+        let mut f = self.company.number_format(key);
+        let n = f.take(day);
+        let mut number = f.render(n, day);
+        for _ in 0..100_000 {
+            if !taken(self, &number) {
+                break;
+            }
+            let n = f.take(day);
+            number = f.render(n, day);
+        }
+        self.company.numbers.insert(key.to_string(), f);
+        number
+    }
+
+    pub fn next_contact_number(&mut self, kind: ContactKind) -> String {
+        let key = if kind == ContactKind::Lieferant { "Lieferant" } else { "Kunde" };
+        self.take_number(key, today(), |d, n| d.contacts.iter().any(|c| c.number == n))
     }
 
     pub fn next_article_number(&mut self) -> String {
-        let n = self.company.next_article_no;
-        self.company.next_article_no += 1;
-        format!("A-{n:04}")
+        self.take_number("Artikel", today(), |d, n| d.articles.iter().any(|a| a.number == n))
     }
 
-    /// Hands out the next running number for a document kind, e.g. "RE-2026-0007".
-    pub fn next_doc_number(&mut self, kind: DocKind, year: i32) -> String {
-        let c = &mut self.company;
-        let (prefix, counter) = match kind {
-            DocKind::Rechnung => (c.invoice_prefix.clone(), &mut c.next_invoice_no),
-            DocKind::Angebot => (c.offer_prefix.clone(), &mut c.next_offer_no),
-            DocKind::Gutschrift => (c.credit_prefix.clone(), &mut c.next_credit_no),
-            DocKind::Auftragsbestaetigung => (c.order_prefix.clone(), &mut c.next_order_no),
-            DocKind::Lieferschein => (c.delivery_prefix.clone(), &mut c.next_delivery_no),
-            DocKind::Bestellung => (c.purchase_prefix.clone(), &mut c.next_purchase_no),
-        };
-        let n = *counter;
-        *counter += 1;
-        format!("{prefix}{year}-{n:04}")
+    /// Hands out the next number for a document kind, e.g. "RE-2026-0007".
+    pub fn next_doc_number(&mut self, kind: DocKind, day: NaiveDate) -> String {
+        self.take_number(kind.name(), day, |d, n| d.documents.iter().any(|x| x.number == n))
     }
 
     /// Pays the rest of an invoice, optionally minus an early-payment discount (percent of the total).
@@ -3252,7 +3457,7 @@ pub fn sample_data() -> Data {
     ];
     for (company, person, street, city) in customers {
         let id = d.new_id();
-        let number = d.next_contact_number();
+        let number = d.next_contact_number(ContactKind::Kunde);
         d.contacts.push(Contact {
             id,
             number,
@@ -3269,7 +3474,7 @@ pub fn sample_data() -> Data {
         });
     }
     let id = d.new_id();
-    let number = d.next_contact_number();
+    let number = d.next_contact_number(ContactKind::Lieferant);
     d.contacts.push(Contact {
         id,
         number,
@@ -3336,7 +3541,7 @@ pub fn sample_data() -> Data {
             })
             .collect();
         let id = d.new_id();
-        let number = d.next_doc_number(DocKind::Rechnung, date.year());
+        let number = d.next_doc_number(DocKind::Rechnung, date);
         d.documents.push(Document {
             id,
             kind: DocKind::Rechnung,
@@ -3360,7 +3565,7 @@ pub fn sample_data() -> Data {
 
     // One open offer and one draft.
     let id = d.new_id();
-    let number = d.next_doc_number(DocKind::Angebot, t.year());
+    let number = d.next_doc_number(DocKind::Angebot, t);
     let a0 = d.articles[0].clone();
     let a2 = d.articles[2].clone();
     d.documents.push(Document {
@@ -3591,6 +3796,44 @@ pub fn sample_data() -> Data {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn number_ranges() {
+        let mut d = Data::default();
+        let day = NaiveDate::from_ymd_opt(2026, 11, 3).unwrap();
+        // Older settings carry on unchanged.
+        d.company.invoice_prefix = "RE-".into();
+        d.company.next_invoice_no = 7;
+        assert_eq!(d.next_doc_number(DocKind::Rechnung, day), "RE-2026-0007");
+        assert_eq!(d.next_doc_number(DocKind::Rechnung, day), "RE-2026-0008");
+        d.company.numbers.insert(
+            "Angebot".into(),
+            NumberFormat {
+                prefix: "AN".into(),
+                date: DatePart::JahrKurzMonat,
+                separator: "/".into(),
+                digits: 3,
+                suffix: "-K".into(),
+                restart: Restart::Monatlich,
+                ..NumberFormat::default()
+            },
+        );
+        assert_eq!(d.next_doc_number(DocKind::Angebot, day), "AN2611/001-K");
+        assert_eq!(d.next_doc_number(DocKind::Angebot, day), "AN2611/002-K");
+        let december = NaiveDate::from_ymd_opt(2026, 12, 1).unwrap();
+        assert_eq!(d.next_doc_number(DocKind::Angebot, december), "AN2612/001-K");
+        // A number that exists already is skipped.
+        d.documents.push(Document { number: "AN2612/002-K".into(), ..Document::default() });
+        assert_eq!(d.next_doc_number(DocKind::Angebot, december), "AN2612/003-K");
+        // Restarting without the date in the number would repeat numbers, so it is not done.
+        let mut f = NumberFormat { date: DatePart::Keine, restart: Restart::Jaehrlich, next: 5, ..NumberFormat::default() };
+        assert!(f.warning().is_some());
+        assert_eq!(f.take(day), 5);
+        assert_eq!(f.take(NaiveDate::from_ymd_opt(2027, 1, 2).unwrap()), 6);
+        assert_eq!(d.next_contact_number(ContactKind::Lieferant), "70001");
+        assert_eq!(d.next_contact_number(ContactKind::Kunde), "10001");
+        assert_eq!(d.next_article_number(), "A-0001");
+    }
 
     #[test]
     fn money_round_trip() {

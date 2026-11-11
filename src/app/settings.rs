@@ -125,32 +125,8 @@ impl App {
         ui.add_space(12.0);
         card(ui, |ui| {
             ui.set_width(ui.available_width().min(840.0));
-            card_title(ui, t("Nummernkreise")); 
-            ui.add_enabled_ui(can, |ui| {
-                egui::Grid::new("numbers")
-                    .num_columns(4)
-                    .spacing([14.0, 8.0])
-                    .show(ui, |ui| {
-                        for (label, prefix, next) in [
-                            ("Rechnungen", &mut c.invoice_prefix, &mut c.next_invoice_no),
-                            ("Angebote", &mut c.offer_prefix, &mut c.next_offer_no),
-                            ("Gutschriften", &mut c.credit_prefix, &mut c.next_credit_no),
-                            ("Auftragsbestätigungen", &mut c.order_prefix, &mut c.next_order_no),
-                            ("Lieferscheine", &mut c.delivery_prefix, &mut c.next_delivery_no),
-                            ("Bestellungen", &mut c.purchase_prefix, &mut c.next_purchase_no),
-                        ] {
-                            ui.label(muted(t(label)));
-                            ui.add_sized([120.0, 28.0], TextEdit::singleline(prefix));
-                            ui.label(muted(t("nächste Nummer")));
-                            ui.add_sized([100.0, 28.0], egui::DragValue::new(next).range(1..=999_999));
-                            ui.end_row();
-                        }
-                    });
-                ui.label(muted(tf!(
-                    "So sieht die nächste Rechnungsnummer aus: {}",
-                    format!("{}{}-{:04}", c.invoice_prefix, self.today.year(), c.next_invoice_no)
-                )));
-            });
+            card_title(ui, t("Nummernkreise"));
+            ui.add_enabled_ui(can, |ui| number_ranges(ui, &mut c, self.today));
         });
         ui.add_space(12.0);
         card(ui, |ui| {
@@ -528,4 +504,98 @@ impl App {
             self.sign_out();
         }
     }
+}
+
+/// The number range editor: one kind at a time, with a preview of every range below.
+fn number_ranges(ui: &mut Ui, c: &mut Company, today: NaiveDate) {
+    ui.label(muted(t(
+        "Wählen Sie, wie die Nummern aufgebaut sind. Eine Nummer, die es schon gibt, wird nie ein zweites Mal vergeben.",
+    )));
+    ui.add_space(4.0);
+    let id = Id::unique("number_kind");
+    let mut kind: usize = ui.data(|d| d.get_temp(id)).unwrap_or(0);
+    ui.horizontal_wrapped(|ui| {
+        for (i, (_, label)) in NUMBER_KINDS.iter().enumerate() {
+            ui.selectable_value(&mut kind, i, t(label));
+        }
+    });
+    ui.data_mut(|d| d.insert_temp(id, kind));
+    let key = NUMBER_KINDS[kind.min(NUMBER_KINDS.len() - 1)].0;
+    let old = c.number_format(key);
+    let mut f = old.clone();
+    ui.add_space(6.0);
+    let field = fit(ui, 300.0, 120.0, 240.0);
+    egui::Grid::new("number_format")
+        .num_columns(4)
+        .spacing([14.0, 8.0])
+        .show(ui, |ui| {
+            ui.label(muted(t("Präfix")));
+            ui.add_sized([field, 28.0], TextEdit::singleline(&mut f.prefix));
+            ui.label(muted(t("Datum in der Nummer")));
+            egui::ComboBox::from_id_salt("number_date")
+                .width(field)
+                .selected_text(t(f.date.name()))
+                .show_ui(ui, |ui| {
+                    for d in DatePart::ALL {
+                        ui.selectable_value(&mut f.date, d, t(d.name()));
+                    }
+                });
+            ui.end_row();
+            ui.label(muted(t("Trennzeichen")));
+            ui.add_enabled(
+                f.date != DatePart::Keine,
+                TextEdit::singleline(&mut f.separator).desired_width(field).char_limit(3),
+            )
+            .on_hover_text(t("Steht zwischen Datum und laufender Nummer."));
+            ui.label(muted(t("Stellen der Nummer")));
+            ui.add(egui::DragValue::new(&mut f.digits).range(0..=10))
+                .on_hover_text(t("Wird vorne mit Nullen aufgefüllt, z. B. 4 Stellen: 0007. 0 = ohne Auffüllen."));
+            ui.end_row();
+            ui.label(muted(t("Suffix")));
+            ui.add_sized([field, 28.0], TextEdit::singleline(&mut f.suffix));
+            ui.label(muted(t("Zählung")));
+            egui::ComboBox::from_id_salt("number_restart")
+                .width(field)
+                .selected_text(t(f.restart.name()))
+                .show_ui(ui, |ui| {
+                    for r in Restart::ALL {
+                        ui.selectable_value(&mut f.restart, r, t(r.name()));
+                    }
+                });
+            ui.end_row();
+            ui.label(muted(t("Startwert")));
+            ui.add(egui::DragValue::new(&mut f.start).range(1..=99_999_999))
+                .on_hover_text(t("Damit beginnt die Zählung nach einem Neubeginn."));
+            ui.label(muted(t("nächste Nummer")));
+            let mut next = f.next_for(today);
+            if ui.add(egui::DragValue::new(&mut next).range(1..=99_999_999)).changed() {
+                f.next = next;
+                f.period = String::new();
+            }
+            ui.end_row();
+        });
+    f.separator = f.separator.chars().filter(|ch| !ch.is_control()).collect();
+    ui.add_space(4.0);
+    ui.horizontal_wrapped(|ui| {
+        ui.label(muted(t("So sieht die nächste Nummer aus:")));
+        ui.label(RichText::new(f.preview(today)).monospace().strong());
+    });
+    if let Some(w) = f.warning() {
+        ui.colored_label(Color32::from_rgb(190, 110, 20), t(w));
+    }
+    if f != old {
+        c.numbers.insert(key.to_string(), f);
+    }
+    ui.add_space(8.0);
+    ui.label(muted(t("Alle Nummernkreise")));
+    egui::Grid::new("number_overview")
+        .num_columns(2)
+        .spacing([18.0, 4.0])
+        .show(ui, |ui| {
+            for (key, label) in NUMBER_KINDS {
+                ui.label(muted(t(label)));
+                ui.label(RichText::new(c.number_format(key).preview(today)).monospace());
+                ui.end_row();
+            }
+        });
 }
