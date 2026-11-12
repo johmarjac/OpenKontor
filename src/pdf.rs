@@ -12,15 +12,12 @@ use crate::pdf_metrics::{HELVETICA, HELVETICA_BOLD};
 const PAGE_W: f32 = 595.28;
 const PAGE_H: f32 = 841.89;
 const MM: f32 = 72.0 / 25.4;
-const LEFT: f32 = 25.0 * MM;
-const RIGHT: f32 = PAGE_W - 20.0 * MM;
 /// Content must stay above the footer.
 const BOTTOM: f32 = 38.0 * MM;
 
-type Rgb = (f32, f32, f32);
+pub type Rgb = (f32, f32, f32);
 const TEXT: Rgb = (0.11, 0.15, 0.20);
 const MUTED: Rgb = (0.40, 0.45, 0.52);
-const ACCENT: Rgb = (0.12, 0.44, 0.55);
 const RULE: Rgb = (0.80, 0.84, 0.88);
 
 // ---- Low-level helpers ----------------------------------------------------------
@@ -103,18 +100,30 @@ fn wrap(s: &str, size: f32, bold: bool, width: f32) -> Vec<String> {
     lines
 }
 
-#[derive(Clone, Copy, PartialEq)]
-enum Align {
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Align {
     Left,
     Right,
+}
+
+/// What a page shows, for drawing it on screen (y counts up from the bottom, in points).
+#[derive(Clone, Debug)]
+pub enum Shape {
+    /// `x` is the left edge, or the right edge for right-aligned text.
+    Text { x: f32, y: f32, size: f32, bold: bool, color: Rgb, align: Align, text: String },
+    Line { x1: f32, y1: f32, x2: f32, y2: f32, width: f32, color: Rgb },
+    Rect { x: f32, y: f32, w: f32, h: f32, color: Rgb },
+    /// Picture 1 is the logo, 2 the letter paper, 3 the signature.
+    Image { slot: u8, x: f32, y: f32, w: f32, h: f32 },
 }
 
 /// One page's drawing commands.
 #[derive(Default)]
 struct Page {
     ops: Vec<u8>,
-    /// The company logo, if this page shows it.
-    logo: Option<Logo>,
+    /// The pictures this page shows, by slot.
+    images: Vec<(u8, Logo)>,
+    shapes: Vec<Shape>,
 }
 
 impl Page {
@@ -122,6 +131,7 @@ impl Page {
         if s.is_empty() {
             return;
         }
+        self.shapes.push(Shape::Text { x, y, size, bold, color, align, text: s.to_string() });
         let x = match align {
             Align::Left => x,
             Align::Right => x - text_width(s, size, bold),
@@ -139,6 +149,7 @@ impl Page {
     }
 
     fn line(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, width: f32, color: Rgb) {
+        self.shapes.push(Shape::Line { x1, y1, x2, y2, width, color });
         self.ops.extend_from_slice(
             format!(
                 "{:.3} {:.3} {:.3} RG {width:.2} w {x1:.2} {y1:.2} m {x2:.2} {y2:.2} l S\n",
@@ -148,13 +159,17 @@ impl Page {
         );
     }
 
-    /// Draws the logo (image /Im1) into a box with its lower left corner at x, y.
-    fn image(&mut self, logo: &Logo, x: f32, y: f32, w: f32, h: f32) {
-        self.logo = Some(logo.clone());
-        self.ops.extend_from_slice(format!("q {w:.2} 0 0 {h:.2} {x:.2} {y:.2} cm /Im1 Do Q\n").as_bytes());
+    /// Draws a picture (/Im1 logo, /Im2 letter paper, /Im3 signature) into a box with its lower left corner at x, y.
+    fn image(&mut self, slot: u8, img: &Logo, x: f32, y: f32, w: f32, h: f32) {
+        if !self.images.iter().any(|(s, _)| *s == slot) {
+            self.images.push((slot, img.clone()));
+        }
+        self.shapes.push(Shape::Image { slot, x, y, w, h });
+        self.ops.extend_from_slice(format!("q {w:.2} 0 0 {h:.2} {x:.2} {y:.2} cm /Im{slot} Do Q\n").as_bytes());
     }
 
     fn rect(&mut self, x: f32, y: f32, w: f32, h: f32, color: Rgb) {
+        self.shapes.push(Shape::Rect { x, y, w, h, color });
         self.ops.extend_from_slice(
             format!(
                 "{:.3} {:.3} {:.3} rg {x:.2} {y:.2} {w:.2} {h:.2} re f\n",
@@ -327,11 +342,22 @@ fn write_pdf_with(pages: &[Page], title: &str, author: &str, attach: Option<Atta
         info
     };
     obj(&mut out, &mut offsets, &info);
-    // The logo is one image object after all others, shared by the pages.
-    let logo = pages.iter().find_map(|p| p.logo.clone());
-    let image_obj = if pdfa { extra + 8 } else { extra };
+    // The pictures (logo, letter paper, signature) come after all other objects, shared by the pages.
+    let mut images: Vec<(u8, Logo)> = Vec::new();
+    for (slot, img) in pages.iter().flat_map(|p| p.images.iter()) {
+        if !images.iter().any(|(s, _)| s == slot) {
+            images.push((*slot, img.clone()));
+        }
+    }
+    let image_base = if pdfa { extra + 8 } else { extra };
+    let image_obj = |slot: u8| image_base + images.iter().position(|(s, _)| *s == slot).unwrap_or(0);
     for (i, page) in pages.iter().enumerate() {
-        let xobject = if page.logo.is_some() { format!(" /XObject << /Im1 {image_obj} 0 R >>") } else { String::new() };
+        let xobject = if page.images.is_empty() {
+            String::new()
+        } else {
+            let refs: Vec<String> = page.images.iter().map(|(s, _)| format!("/Im{s} {} 0 R", image_obj(*s))).collect();
+            format!(" /XObject << {} >>", refs.join(" "))
+        };
         obj(
             &mut out,
             &mut offsets,
@@ -427,7 +453,7 @@ fn write_pdf_with(pages: &[Page], title: &str, author: &str, attach: Option<Atta
         );
         id_source.extend_from_slice(a.xml);
     }
-    if let Some(l) = &logo {
+    for (_, l) in &images {
         let pixels = decode_base64(&l.rgb);
         obj(
             &mut out,
@@ -473,130 +499,281 @@ pub fn zugferd_pdf(data: &Data, doc: &Document) -> Result<Vec<u8>, Vec<String>> 
 
 // ---- Document layout ------------------------------------------------------------
 
-/// Column layout of the item table: (left edge, right edge).
-struct Cols {
-    pos: f32,
-    text: (f32, f32),
-    qty: f32,
-    price: f32,
-    vat: f32,
-    total: f32,
+fn rgb(c: [u8; 3]) -> Rgb {
+    (c[0] as f32 / 255.0, c[1] as f32 / 255.0, c[2] as f32 / 255.0)
 }
 
-fn cols(small: bool) -> Cols {
-    Cols {
-        pos: LEFT,
-        text: (LEFT + 26.0, if small { RIGHT - 230.0 } else { RIGHT - 270.0 }),
-        qty: if small { RIGHT - 150.0 } else { RIGHT - 190.0 },
-        price: if small { RIGHT - 75.0 } else { RIGHT - 115.0 },
-        vat: RIGHT - 75.0,
-        total: RIGHT,
+/// A layout worked out in points.
+struct Style {
+    lay: PdfLayout,
+    left: f32,
+    right: f32,
+    accent: Rgb,
+    /// Running text size relative to 10 pt.
+    scale: f32,
+}
+
+impl Style {
+    fn new(lay: PdfLayout) -> Self {
+        let left = lay.margin_left.clamp(10.0, 40.0) * MM;
+        let right = PAGE_W - lay.margin_right.clamp(8.0, 40.0) * MM;
+        let scale = lay.font_size.clamp(7.0, 14.0) / 10.0;
+        Self { accent: rgb(lay.accent), left, right, scale, lay }
     }
-}
 
-fn table_header(p: &mut Page, y: f32, c: &Cols, small: bool, lang: Lang) -> f32 {
-    let s = 8.5;
-    let l = |de| t_in(lang, de);
-    p.text(c.pos, y, s, true, TEXT, Align::Left, l("Pos."));
-    p.text(c.text.0, y, s, true, TEXT, Align::Left, l("Bezeichnung"));
-    p.text(c.qty, y, s, true, TEXT, Align::Right, l("Menge"));
-    p.text(c.price, y, s, true, TEXT, Align::Right, l("Einzelpreis"));
-    if !small {
-        p.text(c.vat, y, s, true, TEXT, Align::Right, l("USt."));
+    fn s(&self, size: f32) -> f32 {
+        size * self.scale
     }
-    p.text(c.total, y, s, true, TEXT, Align::Right, l("Gesamt"));
-    p.line(LEFT, y - 5.0, RIGHT, y - 5.0, 0.8, TEXT);
-    y - 18.0
-}
 
-fn footer(p: &mut Page, company: &Company, page: usize, pages: usize, lang: Lang) {
-    let l = |de| t_in(lang, de);
-    let y = 26.0 * MM;
-    p.line(LEFT, y + 10.0, RIGHT, y + 10.0, 0.5, RULE);
-    let col_w = (RIGHT - LEFT) / 4.0;
-    let blocks: [Vec<String>; 4] = [
-        vec![company.name.clone(), company.owner.clone(), company.street.clone(), company.zip_city.clone()],
-        vec![
-            if company.phone.is_empty() { String::new() } else { format!("{} {}", l("Tel."), company.phone) },
-            company.email.clone(),
-        ],
-        vec![
-            if company.tax_number.is_empty() { String::new() } else { format!("{} {}", l("Steuernr."), company.tax_number) },
-            if company.vat_id.is_empty() { String::new() } else { format!("{} {}", l("USt-IdNr."), company.vat_id) },
-        ],
-        vec![
-            company.bank.clone(),
-            if company.iban.is_empty() { String::new() } else { format!("IBAN {}", company.iban) },
-            if company.bic.is_empty() { String::new() } else { format!("BIC {}", company.bic) },
-        ],
-    ];
-    for (i, block) in blocks.iter().enumerate() {
-        let mut ly = y;
-        for line in block.iter().filter(|l| !l.is_empty()) {
-            p.text(LEFT + col_w * i as f32, ly, 7.0, false, MUTED, Align::Left, line);
-            ly -= 9.0;
+    fn width(&self) -> f32 {
+        self.right - self.left
+    }
+
+    fn form_a(&self) -> bool {
+        self.lay.address == AddressPos::FormA
+    }
+
+    /// Where the sender line above the address sits.
+    fn address_y(&self) -> f32 {
+        let mm = if self.form_a() { 32.0 } else { 50.0 };
+        PAGE_H - mm * MM
+    }
+
+    /// Where the title starts at the latest.
+    fn title_y(&self) -> f32 {
+        let mm = if self.form_a() { 80.0 } else { 98.0 };
+        PAGE_H - mm * MM
+    }
+
+    /// A new page with the letter paper behind it and the fold marks.
+    fn page(&self, first: bool) -> Page {
+        let mut p = Page::default();
+        if let Some(bg) = &self.lay.background
+            && bg.width > 0
+            && bg.height > 0
+            && (first || !self.lay.background_first_page_only)
+        {
+            p.image(2, bg, 0.0, 0.0, PAGE_W, PAGE_H);
         }
+        if self.lay.fold_marks {
+            let marks = if self.form_a() { [87.0, 192.0] } else { [105.0, 210.0] };
+            for m in marks {
+                let y = PAGE_H - m * MM;
+                p.line(4.0 * MM, y, 8.0 * MM, y, 0.5, MUTED);
+            }
+            let y = PAGE_H - 148.5 * MM;
+            p.line(4.0 * MM, y, 10.0 * MM, y, 0.5, MUTED);
+        }
+        p
     }
-    if pages > 1 {
-        p.text(RIGHT, 12.0 * MM, 7.5, false, MUTED, Align::Right, &crate::i18n::fill(l("Seite {} von {}"), &[&page, &pages]));
-    }
-}
 
-/// Company name, address field (DIN 5008 window position) and the details box on the right.
-/// Returns where the details box ends.
-fn letterhead(p: &mut Page, c: &Company, contact: Option<&Contact>, meta: &[(String, String)]) -> f32 {
-    let y = PAGE_H - 22.0 * MM;
-    p.text(LEFT, y, 18.0, true, ACCENT, Align::Left, &c.name);
-    p.rect(LEFT, y - 9.0, RIGHT - LEFT, 2.0, ACCENT);
-    // The logo sits top right above the line, at most 18 mm high and 60 mm wide.
-    if let Some(logo) = &c.logo
-        && logo.width > 0
-        && logo.height > 0
-    {
-        let ratio = logo.width as f32 / logo.height as f32;
-        let mut h = 18.0 * MM;
+    /// Draws the signature picture at the left; returns where the text continues.
+    fn signature(&self, p: &mut Page, y: f32) -> f32 {
+        let Some(sig) = self.lay.signature.as_ref().filter(|s| s.width > 0 && s.height > 0) else { return y };
+        let ratio = sig.width as f32 / sig.height as f32;
+        let mut h = 16.0 * MM;
         let mut w = h * ratio;
         if w > 60.0 * MM {
             w = 60.0 * MM;
             h = w / ratio;
         }
-        p.image(logo, RIGHT - w, y - 4.0, w, h);
+        p.image(3, sig, self.left, y - h + 8.0, w, h);
+        y - h - 6.0
     }
 
-    let mut my = PAGE_H - 50.0 * MM;
+    fn signature_height(&self) -> f32 {
+        if self.lay.signature.is_some() { 16.0 * MM + 6.0 } else { 0.0 }
+    }
+}
+
+/// Column layout of the item table (right edges for numbers).
+struct Cols {
+    pos: f32,
+    text: (f32, f32),
+    qty: f32,
+    price: f32,
+    vat: Option<f32>,
+    total: f32,
+}
+
+fn cols(st: &Style, vat: bool, quantities_only: bool) -> Cols {
+    let k = st.scale.max(1.0);
+    let (l, r) = (st.left, st.right);
+    let text = if st.lay.show_position { l + 26.0 * k } else { l };
+    if quantities_only {
+        Cols { pos: l, text: (text, r - 90.0 * k), qty: r, price: r, vat: None, total: r }
+    } else if vat {
+        Cols { pos: l, text: (text, r - 270.0 * k), qty: r - 190.0 * k, price: r - 115.0 * k, vat: Some(r - 75.0 * k), total: r }
+    } else {
+        Cols { pos: l, text: (text, r - 230.0 * k), qty: r - 150.0 * k, price: r - 75.0 * k, vat: None, total: r }
+    }
+}
+
+fn table_header(p: &mut Page, y: f32, c: &Cols, st: &Style, lang: Lang, quantities_only: bool) -> f32 {
+    let s = st.s(8.5);
+    let l = |de| t_in(lang, de);
+    if st.lay.show_position {
+        p.text(c.pos, y, s, true, TEXT, Align::Left, l("Pos."));
+    }
+    p.text(c.text.0, y, s, true, TEXT, Align::Left, l("Bezeichnung"));
+    p.text(c.qty, y, s, true, TEXT, Align::Right, l("Menge"));
+    if !quantities_only {
+        p.text(c.price, y, s, true, TEXT, Align::Right, l("Einzelpreis"));
+        if let Some(x) = c.vat {
+            p.text(x, y, s, true, TEXT, Align::Right, l("USt."));
+        }
+        p.text(c.total, y, s, true, TEXT, Align::Right, l("Gesamt"));
+    }
+    p.line(st.left, y - 5.0, st.right, y - 5.0, 0.8, TEXT);
+    y - st.s(18.0)
+}
+
+fn footer(p: &mut Page, company: &Company, st: &Style, page: usize, pages: usize, lang: Lang) {
+    let l = |de| t_in(lang, de);
+    let y = 26.0 * MM;
+    let blocks: Vec<Vec<String>> = match st.lay.footer {
+        FooterStyle::Keiner => Vec::new(),
+        FooterStyle::Eigener => st
+            .lay
+            .footer_columns
+            .iter()
+            .take(4)
+            .map(|c| company.fill_company(c).lines().map(str::to_string).collect::<Vec<_>>())
+            .filter(|b| b.iter().any(|l| !l.trim().is_empty()))
+            .collect(),
+        FooterStyle::Automatisch => vec![
+            vec![company.name.clone(), company.owner.clone(), company.street.clone(), company.zip_city.clone()],
+            vec![
+                if company.phone.is_empty() { String::new() } else { format!("{} {}", l("Tel."), company.phone) },
+                company.email.clone(),
+            ],
+            vec![
+                if company.tax_number.is_empty() { String::new() } else { format!("{} {}", l("Steuernr."), company.tax_number) },
+                if company.vat_id.is_empty() { String::new() } else { format!("{} {}", l("USt-IdNr."), company.vat_id) },
+            ],
+            vec![
+                company.bank.clone(),
+                if company.iban.is_empty() { String::new() } else { format!("IBAN {}", company.iban) },
+                if company.bic.is_empty() { String::new() } else { format!("BIC {}", company.bic) },
+            ],
+        ],
+    };
+    // Own text is wrapped to its column; the automatic details stay on one line each.
+    let own = st.lay.footer == FooterStyle::Eigener;
+    if !blocks.is_empty() {
+        p.line(st.left, y + 10.0, st.right, y + 10.0, 0.5, RULE);
+        let col_w = st.width() / blocks.len().max(1) as f32;
+        for (i, block) in blocks.iter().enumerate() {
+            let mut ly = y;
+            let lines: Vec<String> = block.iter().filter(|l| !l.is_empty()).flat_map(|l| if own { wrap(l, 7.0, false, col_w - 6.0) } else { vec![l.clone()] }).take(6).collect();
+            for line in lines {
+                p.text(st.left + col_w * i as f32, ly, 7.0, false, MUTED, Align::Left, &line);
+                ly -= 9.0;
+            }
+        }
+    }
+    if pages > 1 && st.lay.page_numbers {
+        p.text(st.right, 12.0 * MM, 7.5, false, MUTED, Align::Right, &crate::i18n::fill(l("Seite {} von {}"), &[&page, &pages]));
+    }
+}
+
+/// Letterhead, address field (DIN 5008 window position) and the details box on the right.
+/// Returns where the details box ends.
+fn letterhead(p: &mut Page, c: &Company, st: &Style, contact: Option<&Contact>, meta: &[(String, String)]) -> f32 {
+    let lay = &st.lay;
+    let form_a = st.form_a();
+    let logo = c
+        .logo
+        .as_ref()
+        .filter(|l| l.width > 0 && l.height > 0 && matches!(lay.header, HeaderStyle::NameUndLogo | HeaderStyle::NurLogo));
+    let (top, lowest, usual) = if form_a { (6.0, 25.0, 17.0) } else { (8.0, 44.0, 25.2) };
+    let logo_mm = lay.logo_height.clamp(6.0, lowest - top - 1.5);
+    let rule_mm = if logo.is_some() { (top + logo_mm + 1.5).max(usual) } else { usual };
+    let y_rule = PAGE_H - rule_mm * MM;
+    let name_right = logo.is_some() && lay.logo_pos == LogoPos::Links;
+    if lay.header != HeaderStyle::Keiner {
+        if let Some(logo) = logo {
+            let ratio = logo.width as f32 / logo.height as f32;
+            let mut h = logo_mm * MM;
+            let mut w = h * ratio;
+            if w > 70.0 * MM {
+                w = 70.0 * MM;
+                h = w / ratio;
+            }
+            let x = match lay.logo_pos {
+                LogoPos::Links => st.left,
+                LogoPos::Mitte => (st.left + st.right - w) / 2.0,
+                LogoPos::Rechts => st.right - w,
+            };
+            p.image(1, logo, x, y_rule + 5.0, w, h);
+        }
+        if matches!(lay.header, HeaderStyle::NameUndLogo | HeaderStyle::NurName) {
+            let (x, align) = if name_right { (st.right, Align::Right) } else { (st.left, Align::Left) };
+            p.text(x, y_rule + 9.0, 18.0, true, st.accent, align, &c.name);
+        }
+        if lay.header_rule {
+            p.rect(st.left, y_rule, st.width(), 2.0, st.accent);
+        }
+        if !lay.tagline.trim().is_empty() {
+            let (x, align) = if name_right { (st.right, Align::Right) } else { (st.left, Align::Left) };
+            p.text(x, y_rule - 10.0, 8.0, false, MUTED, align, &c.fill_company(&lay.tagline));
+        }
+    }
+
+    // Details box: labels left, values right, as wide as needed.
+    let size = 9.0;
+    let label_w = meta.iter().map(|(l, _)| text_width(l, size, false)).fold(0.0, f32::max);
+    let value_w = meta.iter().map(|(_, v)| text_width(v, size, true)).fold(0.0, f32::max);
+    let label_x = st.right - (label_w + 12.0 + value_w).max(120.0);
+    let mut my = st.address_y();
     for (label, value) in meta {
-        p.text(RIGHT - 120.0, my, 9.0, false, MUTED, Align::Left, label);
-        p.text(RIGHT, my, 9.0, true, TEXT, Align::Right, value);
+        p.text(label_x, my, size, false, MUTED, Align::Left, label);
+        p.text(st.right, my, size, true, TEXT, Align::Right, value);
         my -= 13.0;
     }
 
-    let mut y = PAGE_H - 50.0 * MM;
-    let sender = [c.name.as_str(), c.street.as_str(), c.zip_city.as_str()]
-        .iter()
-        .filter(|s| !s.is_empty())
-        .cloned()
-        .collect::<Vec<_>>()
-        .join(" · ");
-    p.text(LEFT, y, 7.0, false, MUTED, Align::Left, &sender);
-    p.line(LEFT, y - 2.0, LEFT + text_width(&sender, 7.0, false), y - 2.0, 0.4, MUTED);
+    let mut y = st.address_y();
+    let sender = if lay.sender_line.trim().is_empty() {
+        [c.name.as_str(), c.street.as_str(), c.zip_city.as_str()]
+            .iter()
+            .filter(|s| !s.is_empty())
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(" · ")
+    } else {
+        c.fill_company(&lay.sender_line)
+    };
+    p.text(st.left, y, 7.0, false, MUTED, Align::Left, &sender);
+    p.line(st.left, y - 2.0, st.left + text_width(&sender, 7.0, false), y - 2.0, 0.4, MUTED);
     y -= 16.0;
+    let size = 10.5 * st.scale.clamp(0.9, 1.15);
     if let Some(k) = contact {
         for line in [&k.company, &k.person, &k.street, &k.zip_city] {
             if !line.is_empty() {
-                p.text(LEFT, y, 10.5, false, TEXT, Align::Left, line);
-                y -= 13.5;
+                p.text(st.left, y, size, false, TEXT, Align::Left, line);
+                y -= size * 1.3;
             }
         }
         if !k.country.is_empty() && !matches!(k.country.as_str(), "Deutschland" | "Germany") {
-            p.text(LEFT, y, 10.5, false, TEXT, Align::Left, &k.country.to_uppercase());
+            p.text(st.left, y, size, false, TEXT, Align::Left, &k.country.to_uppercase());
         }
     }
     my
 }
 
-/// A payment reminder (Zahlungserinnerung or Mahnung) for an open invoice.
-pub fn reminder_pdf(data: &Data, doc: &Document, r: &ReminderRecord) -> Vec<u8> {
+/// Writes wrapped text; returns where the next line goes.
+fn paragraph(p: &mut Page, st: &Style, mut y: f32, text: &str, size: f32, bold: bool, color: Rgb) -> f32 {
+    for line in wrap(text, st.s(size), bold, st.width()) {
+        p.text(st.left, y, st.s(size), bold, color, Align::Left, &line);
+        y -= st.s(size * 1.35);
+    }
+    y
+}
+
+/// The pages of a payment reminder (Zahlungserinnerung or Mahnung) for an open invoice.
+fn reminder_pages(data: &Data, doc: &Document, r: &ReminderRecord) -> (Vec<Page>, String, String) {
     let c = &data.company;
+    let st = Style::new(c.layout("Mahnung"));
     let small = c.small_business;
     let contact = data.contact(doc.contact_id);
     let lang = contact.map(|k| k.language).unwrap_or_default();
@@ -605,78 +782,68 @@ pub fn reminder_pdf(data: &Data, doc: &Document, r: &ReminderRecord) -> Vec<u8> 
     let date = |d: chrono::NaiveDate| fmt_date_in(lang, d);
     let gross = doc.totals(small).gross;
     let earlier: Vec<&ReminderRecord> = doc.reminders.iter().filter(|x| x.date <= r.date && *x != r).collect();
+    // Placeholders count the fees up to this reminder.
+    let mut before = doc.clone();
+    before.reminders.retain(|x| x.date <= r.date && x != r);
+    let fill = |s: &str| data.fill_text(s, &before, r.fee, r.due);
+    let (title, intro, outro) = c.doc_text(reminder_title(r.level), lang);
 
-    let mut p = Page::default();
+    let mut p = st.page(true);
     let mut meta = vec![(l("Datum").to_string(), date(r.date))];
     if let Some(k) = contact
         && !k.number.is_empty()
+        && st.lay.show_customer_number
     {
         meta.push((l("Kunden-Nr.").into(), k.number.clone()));
     }
-    let my = letterhead(&mut p, c, contact, &meta);
-    let mut y = (PAGE_H - 98.0 * MM).min(my - 20.0);
-    p.text(LEFT, y, 15.0, true, TEXT, Align::Left, l(reminder_title(r.level)));
-    y -= 22.0;
-
-    let intro = match r.level {
-        0 => l("sicher ist es Ihrer Aufmerksamkeit entgangen, dass die folgende Rechnung noch offen ist. Bitte überweisen Sie den Betrag bis zum unten genannten Datum."),
-        1 => l("trotz unserer Zahlungserinnerung konnten wir zu der folgenden Rechnung noch keinen Zahlungseingang feststellen. Bitte überweisen Sie den offenen Betrag bis zum unten genannten Datum."),
-        2 => l("leider ist die folgende Rechnung trotz Mahnung weiterhin offen. Wir bitten Sie dringend, den offenen Betrag bis zum unten genannten Datum zu überweisen."),
-        _ => l("trotz mehrfacher Erinnerung ist die folgende Rechnung noch immer nicht bezahlt. Geht der offene Betrag nicht bis zum unten genannten Datum ein, werden wir die Forderung ohne weitere Ankündigung gerichtlich geltend machen oder an ein Inkassounternehmen übergeben."),
-    };
-    let greeting = match (lang, contact.map(|k| k.person.trim()).unwrap_or("")) {
-        (Lang::De, "") => "Sehr geehrte Damen und Herren,".to_string(),
-        (Lang::De, name) => format!("Guten Tag {name},"),
-        (Lang::En, "") => "Dear Sir or Madam,".to_string(),
-        (Lang::En, name) => format!("Dear {name},"),
-    };
-    p.text(LEFT, y, 10.0, false, TEXT, Align::Left, &greeting);
-    y -= 18.0;
-    for line in wrap(intro, 10.0, false, RIGHT - LEFT) {
-        p.text(LEFT, y, 10.0, false, TEXT, Align::Left, &line);
-        y -= 13.5;
-    }
+    let my = letterhead(&mut p, c, &st, contact, &meta);
+    let mut y = st.title_y().min(my - 20.0);
+    let title = fill(&title);
+    p.text(st.left, y, st.s(15.0), true, TEXT, Align::Left, &title);
+    y -= st.s(22.0);
+    y = paragraph(&mut p, &st, y, &fill(&intro), 10.0, false, TEXT);
     y -= 12.0;
 
     // The open item and the fees.
-    let s = 8.5;
-    p.text(LEFT, y, s, true, TEXT, Align::Left, l("Rechnung"));
-    p.text(LEFT + 120.0, y, s, true, TEXT, Align::Left, l("Datum"));
-    p.text(LEFT + 210.0, y, s, true, TEXT, Align::Left, l("Fällig am"));
-    p.text(RIGHT, y, s, true, TEXT, Align::Right, l("Betrag"));
-    p.line(LEFT, y - 5.0, RIGHT, y - 5.0, 0.8, TEXT);
-    y -= 18.0;
-    p.text(LEFT, y, 9.5, false, TEXT, Align::Left, &doc.number);
-    p.text(LEFT + 120.0, y, 9.5, false, TEXT, Align::Left, &date(doc.date));
-    p.text(LEFT + 210.0, y, 9.5, false, TEXT, Align::Left, &date(doc.due_date()));
-    p.text(RIGHT, y, 9.5, false, TEXT, Align::Right, &money(gross));
-    y -= 16.0;
+    let s = st.s(8.5);
+    let k = st.scale.max(1.0);
+    let (x_date, x_due) = (st.left + 120.0 * k, st.left + 210.0 * k);
+    p.text(st.left, y, s, true, TEXT, Align::Left, l("Rechnung"));
+    p.text(x_date, y, s, true, TEXT, Align::Left, l("Datum"));
+    p.text(x_due, y, s, true, TEXT, Align::Left, l("Fällig am"));
+    p.text(st.right, y, s, true, TEXT, Align::Right, l("Betrag"));
+    p.line(st.left, y - 5.0, st.right, y - 5.0, 0.8, TEXT);
+    y -= st.s(18.0);
+    let s = st.s(9.5);
+    p.text(st.left, y, s, false, TEXT, Align::Left, &doc.number);
+    p.text(x_date, y, s, false, TEXT, Align::Left, &date(doc.date));
+    p.text(x_due, y, s, false, TEXT, Align::Left, &date(doc.due_date()));
+    p.text(st.right, y, s, false, TEXT, Align::Right, &money(gross));
+    y -= st.s(16.0);
     let mut total = gross;
     for e in &earlier {
         if e.fee > 0 {
-            p.text(LEFT, y, 9.5, false, TEXT, Align::Left, &crate::i18n::fill(l("Mahngebühr {} vom {}"), &[&l(reminder_title(e.level)), &date(e.date)]));
-            p.text(RIGHT, y, 9.5, false, TEXT, Align::Right, &money(e.fee));
+            p.text(st.left, y, s, false, TEXT, Align::Left, &crate::i18n::fill(l("Mahngebühr {} vom {}"), &[&l(reminder_title(e.level)), &date(e.date)]));
+            p.text(st.right, y, s, false, TEXT, Align::Right, &money(e.fee));
             total += e.fee;
-            y -= 16.0;
+            y -= st.s(16.0);
         }
     }
     if r.fee > 0 {
-        p.text(LEFT, y, 9.5, false, TEXT, Align::Left, l("Mahngebühr dieser Mahnung"));
-        p.text(RIGHT, y, 9.5, false, TEXT, Align::Right, &money(r.fee));
+        p.text(st.left, y, s, false, TEXT, Align::Left, l("Mahngebühr dieser Mahnung"));
+        p.text(st.right, y, s, false, TEXT, Align::Right, &money(r.fee));
         total += r.fee;
-        y -= 16.0;
+        y -= st.s(16.0);
     }
-    p.line(RIGHT - 190.0, y + 8.0, RIGHT, y + 8.0, 1.2, TEXT);
+    let label_x = st.right - 190.0 * k;
+    p.line(label_x, y + 8.0, st.right, y + 8.0, 1.2, TEXT);
     y -= 6.0;
-    p.text(RIGHT - 190.0, y, 11.5, true, TEXT, Align::Left, l("Offener Betrag"));
-    p.text(RIGHT, y, 11.5, true, TEXT, Align::Right, &money(total));
-    y -= 30.0;
+    p.text(label_x, y, st.s(11.5), true, TEXT, Align::Left, l("Offener Betrag"));
+    p.text(st.right, y, st.s(11.5), true, TEXT, Align::Right, &money(total));
+    y -= st.s(30.0);
 
     let pay = crate::i18n::fill(l("Bitte überweisen Sie {} bis zum {} auf unser Konto:"), &[&money(total), &date(r.due)]);
-    for line in wrap(&pay, 10.0, true, RIGHT - LEFT) {
-        p.text(LEFT, y, 10.0, true, TEXT, Align::Left, &line);
-        y -= 13.5;
-    }
+    y = paragraph(&mut p, &st, y, &pay, 10.0, true, TEXT);
     for line in [
         c.bank.clone(),
         if c.iban.is_empty() { String::new() } else { format!("IBAN {}", c.iban) },
@@ -684,25 +851,32 @@ pub fn reminder_pdf(data: &Data, doc: &Document, r: &ReminderRecord) -> Vec<u8> 
         crate::i18n::fill(l("Verwendungszweck: {}"), &[&doc.number]),
     ] {
         if !line.is_empty() {
-            p.text(LEFT, y, 10.0, false, TEXT, Align::Left, &line);
-            y -= 13.5;
+            p.text(st.left, y, st.s(10.0), false, TEXT, Align::Left, &line);
+            y -= st.s(13.5);
         }
     }
     y -= 10.0;
-    for line in wrap(l("Sollten Sie die Zahlung inzwischen veranlasst haben, betrachten Sie dieses Schreiben bitte als gegenstandslos."), 9.0, false, RIGHT - LEFT) {
-        p.text(LEFT, y, 9.0, false, MUTED, Align::Left, &line);
-        y -= 12.0;
-    }
-    footer(&mut p, c, 1, 1, lang);
+    y = paragraph(&mut p, &st, y, &fill(&outro), 9.0, false, MUTED);
+    st.signature(&mut p, y - 4.0);
+    footer(&mut p, c, &st, 1, 1, lang);
     let title = format!("{} {}", l(reminder_title(r.level)), doc.number);
-    write_pdf(&[p], &title, &c.name)
+    (vec![p], title, c.name.clone())
+}
+
+/// A payment reminder (Zahlungserinnerung or Mahnung) for an open invoice.
+pub fn reminder_pdf(data: &Data, doc: &Document, r: &ReminderRecord) -> Vec<u8> {
+    let (pages, title, author) = reminder_pages(data, doc, r);
+    write_pdf(&pages, &title, &author)
 }
 
 /// A file name like "1. Mahnung RE-2026-0012.pdf".
-pub fn reminder_file_name(doc: &Document, r: &ReminderRecord) -> String {
-    let base = file_name(doc);
-    let number = base.split_once(' ').map(|(_, n)| n).unwrap_or(&base);
-    format!("{} {number}", crate::i18n::t(reminder_title(r.level)))
+pub fn reminder_file_name(data: &Data, doc: &Document, r: &ReminderRecord) -> String {
+    let _ = data;
+    let number: String = if doc.number.is_empty() { "Entwurf".to_string() } else { doc.number.clone() }
+        .chars()
+        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .collect();
+    format!("{} {number}.pdf", crate::i18n::t(reminder_title(r.level)))
 }
 
 /// The finished PDF for an offer, invoice or credit note.
@@ -714,6 +888,7 @@ pub fn document_pdf(data: &Data, doc: &Document) -> Vec<u8> {
 /// The laid-out pages of a document, with title and author for the file's details.
 fn document_pages(data: &Data, doc: &Document) -> (Vec<Page>, String, String) {
     let c = &data.company;
+    let st = Style::new(c.layout(doc.kind.name()));
     let small = c.small_business;
     let contact = data.contact(doc.contact_id);
     let totals = doc.totals(small);
@@ -721,13 +896,13 @@ fn document_pages(data: &Data, doc: &Document) -> (Vec<Page>, String, String) {
     let l = |de| t_in(lang, de);
     let money = |c: Cents| fmt_money_cur(lang, c, doc.currency());
     let date = |d: chrono::NaiveDate| fmt_date_in(lang, d);
+    let fill = |s: &str| data.fill_text(s, doc, 0, doc.due_date());
     let kind = l(doc.kind.name());
     let number = if doc.number.is_empty() { l("ENTWURF").to_string() } else { doc.number.clone() };
     let sign = if doc.kind == DocKind::Gutschrift { -1 } else { 1 };
-    let col = cols(small);
 
     let mut pages: Vec<Page> = Vec::new();
-    let mut p = Page::default();
+    let mut p = st.page(true);
 
     // Details box on the right.
     let mut meta: Vec<(String, String)> = vec![
@@ -745,6 +920,7 @@ fn document_pages(data: &Data, doc: &Document) -> (Vec<Page>, String, String) {
     if let Some(k) = contact
         && !k.number.is_empty()
         && doc.kind != DocKind::Bestellung
+        && st.lay.show_customer_number
     {
         meta.push((l("Kunden-Nr.").into(), k.number.clone()));
     }
@@ -756,130 +932,124 @@ fn document_pages(data: &Data, doc: &Document) -> (Vec<Page>, String, String) {
     }
     // A delivery note shows quantities only.
     let quantities_only = doc.kind == DocKind::Lieferschein;
-    let my = letterhead(&mut p, c, contact, &meta);
+    let my = letterhead(&mut p, c, &st, contact, &meta);
 
     // Title and opening text.
-    let mut y = (PAGE_H - 98.0 * MM).min(my - 20.0);
-    let title = if doc.title.is_empty() { kind } else { &doc.title };
-    p.text(LEFT, y, 15.0, true, TEXT, Align::Left, title);
-    y -= 20.0;
-    for line in wrap(&doc.intro, 10.0, false, RIGHT - LEFT) {
-        p.text(LEFT, y, 10.0, false, TEXT, Align::Left, &line);
-        y -= 13.5;
-    }
+    let mut y = st.title_y().min(my - 20.0);
+    let title = fill(if doc.title.is_empty() { kind } else { &doc.title });
+    p.text(st.left, y, st.s(15.0), true, TEXT, Align::Left, &title);
+    y -= st.s(20.0);
+    y = paragraph(&mut p, &st, y, &fill(&doc.intro), 10.0, false, TEXT);
     y -= 8.0;
 
     // Item table, continued on further pages when needed.
-    let small = small || quantities_only;
-    let col = if quantities_only { Cols { qty: RIGHT, ..cols(true) } } else { col };
-    let header = |p: &mut Page, y: f32| {
-        if quantities_only {
-            let s = 8.5;
-            p.text(col.pos, y, s, true, TEXT, Align::Left, l("Pos."));
-            p.text(col.text.0, y, s, true, TEXT, Align::Left, l("Bezeichnung"));
-            p.text(RIGHT, y, s, true, TEXT, Align::Right, l("Menge"));
-            p.line(LEFT, y - 5.0, RIGHT, y - 5.0, 0.8, TEXT);
-            y - 18.0
-        } else {
-            table_header(p, y, &col, small, lang)
-        }
-    };
-    y = header(&mut p, y);
+    let vat_col = !small && !quantities_only && st.lay.show_vat_column;
+    let col = cols(&st, vat_col, quantities_only);
+    y = table_header(&mut p, y, &col, &st, lang, quantities_only);
+    let (size, step) = (st.s(9.5), st.s(12.0));
     for (i, l) in doc.lines.iter().enumerate() {
-        let mut text_lines = wrap(&l.text, 9.5, false, col.text.1 - col.text.0);
+        let mut text_lines = wrap(&l.text, size, false, col.text.1 - col.text.0);
         if text_lines.is_empty() {
             text_lines.push(String::new());
         }
         if l.discount_pct > 0.0 {
             text_lines.push(crate::i18n::fill(t_in(lang, "abzgl. {} % Rabatt"), &[&fmt_qty_in(lang, l.discount_pct)]));
         }
-        let row_h = text_lines.len() as f32 * 12.0 + 7.0;
+        let row_h = text_lines.len() as f32 * step + 7.0;
         if y - row_h < BOTTOM {
-            pages.push(std::mem::take(&mut p));
+            pages.push(std::mem::replace(&mut p, st.page(false)));
             y = PAGE_H - 25.0 * MM;
-            p.text(LEFT, y, 9.0, false, MUTED, Align::Left, &crate::i18n::fill(t_in(lang, "{} {} – Fortsetzung"), &[&kind, &number]));
+            p.text(st.left, y, 9.0, false, MUTED, Align::Left, &crate::i18n::fill(t_in(lang, "{} {} – Fortsetzung"), &[&kind, &number]));
             y -= 22.0;
-            y = header(&mut p, y);
+            y = table_header(&mut p, y, &col, &st, lang, quantities_only);
         }
-        p.text(col.pos, y, 9.5, false, TEXT, Align::Left, &(i + 1).to_string());
+        if st.lay.show_position {
+            p.text(col.pos, y, size, false, TEXT, Align::Left, &(i + 1).to_string());
+        }
         for (k, t) in text_lines.iter().enumerate() {
             let is_discount = l.discount_pct > 0.0 && k == text_lines.len() - 1;
             p.text(
                 col.text.0,
-                y - k as f32 * 12.0,
-                if is_discount { 8.0 } else { 9.5 },
+                y - k as f32 * step,
+                if is_discount { st.s(8.0) } else { size },
                 false,
                 if is_discount { MUTED } else { TEXT },
                 Align::Left,
                 t,
             );
         }
-        p.text(col.qty, y, 9.5, false, TEXT, Align::Right, &format!("{} {}", fmt_qty_in(lang, l.qty), l.unit));
+        p.text(col.qty, y, size, false, TEXT, Align::Right, &format!("{} {}", fmt_qty_in(lang, l.qty), l.unit));
         if !quantities_only {
-            p.text(col.price, y, 9.5, false, TEXT, Align::Right, &money(l.price_net));
-            if !small {
-                p.text(col.vat, y, 9.5, false, TEXT, Align::Right, &format!("{} %", l.vat));
+            p.text(col.price, y, size, false, TEXT, Align::Right, &money(l.price_net));
+            if let Some(x) = col.vat {
+                p.text(x, y, size, false, TEXT, Align::Right, &format!("{} %", l.vat));
             }
-            p.text(col.total, y, 9.5, false, TEXT, Align::Right, &money(sign * l.net()));
+            p.text(col.total, y, size, false, TEXT, Align::Right, &money(sign * l.net()));
         }
         y -= row_h;
-        p.line(LEFT, y + 9.0, RIGHT, y + 9.0, 0.4, RULE);
+        p.line(st.left, y + 9.0, st.right, y + 9.0, 0.4, RULE);
     }
 
     if quantities_only {
         y -= 14.0;
-        for line in wrap(&doc.outro, 10.0, false, RIGHT - LEFT) {
-            p.text(LEFT, y, 10.0, false, TEXT, Align::Left, &line);
-            y -= 13.5;
-        }
+        y = paragraph(&mut p, &st, y, &fill(&doc.outro), 10.0, false, TEXT);
+        y = st.signature(&mut p, y);
         y -= 30.0;
-        p.line(LEFT, y, LEFT + 180.0, y, 0.6, TEXT);
-        p.text(LEFT, y - 11.0, 8.0, false, MUTED, Align::Left, l("Datum, Unterschrift Empfänger"));
+        if y < BOTTOM {
+            pages.push(std::mem::replace(&mut p, st.page(false)));
+            y = PAGE_H - 40.0 * MM;
+        }
+        p.line(st.left, y, st.left + 180.0, y, 0.6, TEXT);
+        p.text(st.left, y - 11.0, 8.0, false, MUTED, Align::Left, l("Datum, Unterschrift Empfänger"));
         pages.push(p);
         let n = pages.len();
         for (i, page) in pages.iter_mut().enumerate() {
-            footer(page, c, i + 1, n, lang);
+            footer(page, c, &st, i + 1, n, lang);
         }
         return (pages, format!("{kind} {number}"), c.name.clone());
     }
 
     // Totals; keep them together with the closing text on one page.
     let tax_rows = if small { 0 } else { totals.by_rate.keys().filter(|r| **r > 0).count() };
-    let outro = wrap(&doc.outro, 10.0, false, RIGHT - LEFT);
+    let outro = wrap(&fill(&doc.outro), st.s(10.0), false, st.width());
     let pay = payment_lines(doc, small, lang);
-    let needed = 30.0 + tax_rows as f32 * 14.0 + 30.0 + (outro.len() + pay.len()) as f32 * 13.5 + if small { 16.0 } else { 0.0 };
+    let needed = st.s(30.0 + tax_rows as f32 * 14.0 + 30.0 + (outro.len() + pay.len()) as f32 * 13.5 + if small { 16.0 } else { 0.0 })
+        + st.signature_height();
     if y - needed < BOTTOM {
-        pages.push(std::mem::take(&mut p));
+        pages.push(std::mem::replace(&mut p, st.page(false)));
         y = PAGE_H - 25.0 * MM;
     }
     y -= 8.0;
-    let label_x = RIGHT - 190.0;
-    p.text(label_x, y, 10.0, false, TEXT, Align::Left, l("Summe netto"));
-    p.text(RIGHT, y, 10.0, false, TEXT, Align::Right, &money(totals.net));
-    y -= 14.0;
+    let k = st.scale.max(1.0);
+    let label_x = st.right - 190.0 * k;
+    let (s10, step) = (st.s(10.0), st.s(14.0));
+    p.text(label_x, y, s10, false, TEXT, Align::Left, l("Summe netto"));
+    p.text(st.right, y, s10, false, TEXT, Align::Right, &money(totals.net));
+    y -= step;
     if !small {
         for (rate, (_net, tax)) in &totals.by_rate {
             if *rate > 0 {
-                p.text(label_x, y, 10.0, false, TEXT, Align::Left, &crate::i18n::fill(l("zzgl. Umsatzsteuer {} %"), &[rate]));
-                p.text(RIGHT, y, 10.0, false, TEXT, Align::Right, &money(*tax));
-                y -= 14.0;
+                p.text(label_x, y, s10, false, TEXT, Align::Left, &crate::i18n::fill(l("zzgl. Umsatzsteuer {} %"), &[rate]));
+                p.text(st.right, y, s10, false, TEXT, Align::Right, &money(*tax));
+                y -= step;
             }
         }
     }
-    p.line(label_x, y + 8.0, RIGHT, y + 8.0, 1.2, TEXT);
+    p.line(label_x, y + 8.0, st.right, y + 8.0, 1.2, TEXT);
     y -= 6.0;
-    p.text(label_x, y, 11.5, true, TEXT, Align::Left, l("Gesamtbetrag"));
-    p.text(RIGHT, y, 11.5, true, TEXT, Align::Right, &money(totals.gross));
-    y -= 28.0;
+    p.text(label_x, y, st.s(11.5), true, TEXT, Align::Left, l("Gesamtbetrag"));
+    p.text(st.right, y, st.s(11.5), true, TEXT, Align::Right, &money(totals.gross));
+    y -= st.s(28.0);
+    let s85 = st.s(8.5);
     if c.small_business {
-        p.text(LEFT, y, 8.5, false, MUTED, Align::Left, l("Gemäß § 19 UStG wird keine Umsatzsteuer berechnet."));
-        y -= 16.0;
+        p.text(st.left, y, s85, false, MUTED, Align::Left, l("Gemäß § 19 UStG wird keine Umsatzsteuer berechnet."));
+        y -= st.s(16.0);
     } else if let Some(note) = doc.vat_case.invoice_note() {
-        p.text(LEFT, y, 8.5, false, TEXT, Align::Left, l(note));
-        y -= 12.0;
+        p.text(st.left, y, s85, false, TEXT, Align::Left, l(note));
+        y -= st.s(12.0);
         if let Some(k) = contact.filter(|k| !k.vat_id.is_empty()) {
-            p.text(LEFT, y, 8.5, false, MUTED, Align::Left, &crate::i18n::fill(l("USt-IdNr. des Kunden: {}"), &[&k.vat_id]));
-            y -= 12.0;
+            p.text(st.left, y, s85, false, MUTED, Align::Left, &crate::i18n::fill(l("USt-IdNr. des Kunden: {}"), &[&k.vat_id]));
+            y -= st.s(12.0);
         }
         y -= 4.0;
     }
@@ -889,36 +1059,76 @@ fn document_pages(data: &Data, doc: &Document) -> (Vec<Page>, String, String) {
             l("Umsatzsteuer in Euro: {} (Kurs: 1 EUR = {} {})"),
             &[&fmt_money_in(lang, doc.to_eur(totals.tax)), &format!("{:.4}", doc.exchange_rate), &doc.currency()],
         );
-        p.text(LEFT, y, 8.5, false, MUTED, Align::Left, &text);
-        y -= 14.0;
+        p.text(st.left, y, s85, false, MUTED, Align::Left, &text);
+        y -= st.s(14.0);
     }
     let paid = doc.paid_total();
     if doc.kind.is_billing() && paid != 0 && doc.status == DocStatus::Offen {
-        p.text(label_x, y, 10.0, false, TEXT, Align::Left, l("Bereits bezahlt"));
-        p.text(RIGHT, y, 10.0, false, TEXT, Align::Right, &money(paid));
-        y -= 14.0;
-        p.text(label_x, y, 10.5, true, TEXT, Align::Left, l("Noch offen"));
-        p.text(RIGHT, y, 10.5, true, TEXT, Align::Right, &money(totals.gross - paid));
-        y -= 22.0;
+        p.text(label_x, y, s10, false, TEXT, Align::Left, l("Bereits bezahlt"));
+        p.text(st.right, y, s10, false, TEXT, Align::Right, &money(paid));
+        y -= step;
+        p.text(label_x, y, st.s(10.5), true, TEXT, Align::Left, l("Noch offen"));
+        p.text(st.right, y, st.s(10.5), true, TEXT, Align::Right, &money(totals.gross - paid));
+        y -= st.s(22.0);
     }
+    let line_h = st.s(13.5);
     for line in &pay {
-        p.text(LEFT, y, 10.0, false, TEXT, Align::Left, line);
-        y -= 13.5;
+        p.text(st.left, y, s10, false, TEXT, Align::Left, line);
+        y -= line_h;
     }
     if !pay.is_empty() {
         y -= 6.0;
     }
     for line in outro {
-        p.text(LEFT, y, 10.0, false, TEXT, Align::Left, &line);
-        y -= 13.5;
+        p.text(st.left, y, s10, false, TEXT, Align::Left, &line);
+        y -= line_h;
     }
+    st.signature(&mut p, y - 4.0);
     pages.push(p);
 
     let n = pages.len();
     for (i, page) in pages.iter_mut().enumerate() {
-        footer(page, c, i + 1, n, lang);
+        footer(page, c, &st, i + 1, n, lang);
     }
     (pages, format!("{kind} {number}"), c.name.clone())
+}
+
+// ---- Preview ----------------------------------------------------------------------
+
+/// Page size in points (A4).
+pub const PAGE_SIZE: (f32, f32) = (PAGE_W, PAGE_H);
+
+/// A page as shapes, to draw it on screen exactly as it prints.
+pub struct PreviewPage {
+    pub shapes: Vec<Shape>,
+    pub images: Vec<(u8, Logo)>,
+}
+
+fn preview_of(pages: Vec<Page>) -> Vec<PreviewPage> {
+    pages.into_iter().map(|p| PreviewPage { shapes: p.shapes, images: p.images }).collect()
+}
+
+/// The pages of a document as they will print.
+pub fn document_preview(data: &Data, doc: &Document) -> Vec<PreviewPage> {
+    preview_of(document_pages(data, doc).0)
+}
+
+/// The pages of a reminder as they will print.
+pub fn reminder_preview(data: &Data, doc: &Document, r: &ReminderRecord) -> Vec<PreviewPage> {
+    preview_of(reminder_pages(data, doc, r).0)
+}
+
+/// The fonts of the PDF (metrically the same as Helvetica), for drawing previews.
+pub fn preview_fonts() -> (&'static [u8], &'static [u8]) {
+    (FONT_REGULAR, FONT_BOLD)
+}
+
+/// Unpacks a stored picture into RGB pixels.
+pub fn logo_pixels(logo: &Logo) -> Vec<u8> {
+    use std::io::Read;
+    let mut out = Vec::new();
+    let _ = flate2::read::ZlibDecoder::new(decode_base64(&logo.rgb).as_slice()).read_to_end(&mut out);
+    out
 }
 
 /// One block of a text report: a heading, paragraphs, or a table of label/amount rows.
@@ -932,15 +1142,17 @@ pub enum Block {
 /// A plain report on the letterhead, e.g. the procedure documentation or a balance sheet.
 pub fn report_pdf(data: &Data, title: &str, subtitle: &str, blocks: &[Block]) -> Vec<u8> {
     let c = &data.company;
+    let st = Style::new(c.layout(""));
+    let (left, right) = (st.left, st.right);
     let mut pages = Vec::new();
     let mut p = Page::default();
     let mut y = PAGE_H - 22.0 * MM;
-    p.text(LEFT, y, 14.0, true, ACCENT, Align::Left, &c.name);
-    p.rect(LEFT, y - 7.0, RIGHT - LEFT, 1.5, ACCENT);
+    p.text(left, y, 14.0, true, st.accent, Align::Left, &c.name);
+    p.rect(left, y - 7.0, right - left, 1.5, st.accent);
     y -= 34.0;
-    p.text(LEFT, y, 16.0, true, TEXT, Align::Left, title);
+    p.text(left, y, 16.0, true, TEXT, Align::Left, title);
     y -= 16.0;
-    p.text(LEFT, y, 9.5, false, MUTED, Align::Left, subtitle);
+    p.text(left, y, 9.5, false, MUTED, Align::Left, subtitle);
     y -= 22.0;
     let mut new_page = |p: &mut Page, y: &mut f32| {
         if *y < BOTTOM {
@@ -956,14 +1168,14 @@ pub fn report_pdf(data: &Data, title: &str, subtitle: &str, blocks: &[Block]) ->
                     new_page(&mut p, &mut y);
                 }
                 y -= 6.0;
-                p.text(LEFT, y, 11.5, true, ACCENT, Align::Left, h);
+                p.text(left, y, 11.5, true, st.accent, Align::Left, h);
                 y -= 16.0;
             }
             Block::Paragraph(text) => {
                 for para in text.split('\n') {
-                    for line in wrap(para, 9.5, false, RIGHT - LEFT) {
+                    for line in wrap(para, 9.5, false, right - left) {
                         new_page(&mut p, &mut y);
-                        p.text(LEFT, y, 9.5, false, TEXT, Align::Left, &line);
+                        p.text(left, y, 9.5, false, TEXT, Align::Left, &line);
                         y -= 12.5;
                     }
                 }
@@ -973,14 +1185,14 @@ pub fn report_pdf(data: &Data, title: &str, subtitle: &str, blocks: &[Block]) ->
                 for (label, value, bold) in rows {
                     new_page(&mut p, &mut y);
                     if label.is_empty() && value.is_empty() {
-                        p.line(LEFT, y + 8.0, RIGHT, y + 8.0, 0.5, RULE);
+                        p.line(left, y + 8.0, right, y + 8.0, 0.5, RULE);
                         y -= 4.0;
                         continue;
                     }
-                    for (k, line) in wrap(label, 9.5, *bold, RIGHT - LEFT - 120.0).iter().enumerate() {
-                        p.text(LEFT, y - k as f32 * 12.0, 9.5, *bold, TEXT, Align::Left, line);
+                    for (k, line) in wrap(label, 9.5, *bold, right - left - 120.0).iter().enumerate() {
+                        p.text(left, y - k as f32 * 12.0, 9.5, *bold, TEXT, Align::Left, line);
                     }
-                    p.text(RIGHT, y, 9.5, *bold, TEXT, Align::Right, value);
+                    p.text(right, y, 9.5, *bold, TEXT, Align::Right, value);
                     y -= 14.0;
                 }
                 y -= 6.0;
@@ -990,7 +1202,7 @@ pub fn report_pdf(data: &Data, title: &str, subtitle: &str, blocks: &[Block]) ->
     pages.push(p);
     let n = pages.len();
     for (i, page) in pages.iter_mut().enumerate() {
-        footer(page, c, i + 1, n, Lang::De);
+        footer(page, c, &st, i + 1, n, Lang::De);
     }
     write_pdf(&pages, title, &c.name)
 }
@@ -1040,14 +1252,9 @@ pub fn make_logo(width: u32, height: u32, rgb: &[u8]) -> Logo {
     Logo { width, height, rgb: encode_base64(&deflate(rgb)) }
 }
 
-/// A file name like "Rechnung RE-2026-0012.pdf".
-pub fn file_name(doc: &Document) -> String {
-    let number = if doc.number.is_empty() { "Entwurf".to_string() } else { doc.number.clone() };
-    let clean: String = number
-        .chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
-        .collect();
-    format!("{} {clean}.pdf", doc.kind.label())
+/// A file name like "Rechnung RE-2026-0012.pdf", after the company's pattern.
+pub fn file_name(data: &Data, doc: &Document) -> String {
+    data.company.pdf_file_name(doc, &data.contact_name(doc.contact_id))
 }
 
 #[cfg(test)]
@@ -1060,6 +1267,42 @@ mod tests {
         assert_eq!(win_ansi('ä'), 0xE4);
         assert_eq!(win_ansi('€'), 0x80);
         assert_eq!(pdf_string("(a)"), b"(\\(a\\))".to_vec());
+    }
+
+    #[test]
+    fn layouts_and_texts_are_used() {
+        let mut data = sample_data();
+        let mut offer = data.documents.iter().find(|d| d.kind == DocKind::Angebot).unwrap().clone();
+        offer.intro = "Angebot für {kunde}, gültig bis {faellig}.".into();
+        let picture = make_logo(2, 2, &[200; 12]);
+        data.company.pdf_layouts.insert(
+            "Angebot".into(),
+            PdfLayout {
+                background: Some(picture.clone()),
+                signature: Some(picture),
+                footer: FooterStyle::Eigener,
+                footer_columns: vec!["{firma} – IBAN {iban}".into()],
+                show_position: false,
+                ..PdfLayout::default()
+            },
+        );
+        data.company.file_name_pattern = "{jahr} {art} {nummer} {kunde}".into();
+        let pdf = String::from_utf8_lossy(&document_pdf(&data, &offer)).into_owned();
+        assert!(pdf.contains("/Im2 Do") && pdf.contains("/Im3 Do"));
+        let customer = data.contact_name(offer.contact_id);
+        assert!(pdf.contains(&format!("(Angebot f\u{fc}r {customer}")) || pdf.contains("Angebot f"));
+        assert!(!pdf.contains("{kunde}"));
+        assert!(pdf.contains(&format!("({} \u{2013} IBAN", data.company.name)) || pdf.contains("IBAN"));
+        // Invoices keep the standard layout.
+        let invoice = data.documents.iter().find(|d| d.kind == DocKind::Rechnung).unwrap();
+        assert!(!String::from_utf8_lossy(&document_pdf(&data, invoice)).contains("/Im2"));
+        let name = file_name(&data, &offer);
+        assert!(name.starts_with(&offer.date.format("%Y").to_string()) && name.ends_with(".pdf") && name.contains("Angebot"));
+        // Reminder texts come from the templates, with the greeting filled in.
+        let r = ReminderRecord { level: 0, date: invoice.date, fee: 0, due: invoice.date };
+        let preview = reminder_preview(&data, invoice, &r);
+        let texts: Vec<String> = preview[0].shapes.iter().filter_map(|s| if let Shape::Text { text, .. } = s { Some(text.clone()) } else { None }).collect();
+        assert!(texts.iter().any(|t| t.starts_with("Guten Tag") || t.starts_with("Sehr geehrte")));
     }
 
     #[test]

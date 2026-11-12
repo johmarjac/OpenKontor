@@ -6,6 +6,7 @@ mod books;
 mod documents;
 mod extras;
 mod mailing;
+mod pdf_view;
 mod projects;
 mod receipts;
 mod recurring;
@@ -16,6 +17,7 @@ mod settings_more;
 mod statements;
 mod stock;
 mod storage;
+mod templates;
 
 use crate::backend::{Backend, ClientConfig, Remote};
 use crate::export;
@@ -164,6 +166,7 @@ enum SettingsTab {
     Daten,
     Sprache,
     Email,
+    Vorlagen,
 }
 
 #[derive(PartialEq, Eq)]
@@ -211,6 +214,7 @@ pub struct App {
     /// The e-mail being written, if the send window is open.
     mail_draft: Option<mailing::MailDraft>,
     mail_state: mailing::MailSettingsState,
+    templates: templates::TemplatesState,
     receipts: receipts::ReceiptsState,
     /// Early-payment discount to deduct when booking the payment.
     doc_paid_discount: f64,
@@ -280,6 +284,7 @@ impl App {
         lang: Option<Lang>,
     ) -> Self {
         setup_style(&cc.egui_ctx);
+        pdf_view::install_fonts(&cc.egui_ctx);
         let today = today();
         let cfg = ClientConfig::load();
         // Pictures are taken in German unless another language is asked for.
@@ -315,6 +320,7 @@ impl App {
             doc_paid_date: today,
             mail_draft: None,
             mail_state: Default::default(),
+            templates: Default::default(),
             receipts: receipts::ReceiptsState { filter: Some(ReceiptStatus::Neu), ..Default::default() },
             doc_paid_discount: 0.0,
             doc_pay_amount: 0,
@@ -409,6 +415,11 @@ impl App {
                     "daten" => app.settings_tab = SettingsTab::Daten,
                     "sprache" => app.settings_tab = SettingsTab::Sprache,
                     "email" => app.settings_tab = SettingsTab::Email,
+                    "vorlagen" => app.settings_tab = SettingsTab::Vorlagen,
+                    "texte" => {
+                        app.settings_tab = SettingsTab::Vorlagen;
+                        app.templates.tab = templates::TemplatesTab::Texte;
+                    }
                     "kasse" => app.books.tab = books::BooksTab::Kasse,
                     "anlagen" => app.books.tab = books::BooksTab::Anlagen,
                     "umbuchungen" => app.books.tab = books::BooksTab::Umbuchungen,
@@ -710,10 +721,10 @@ impl App {
 
     fn new_doc(&self, kind: DocKind) -> Document {
         let due = match kind {
-            DocKind::Angebot => 30,
+            DocKind::Angebot => self.data.company.offer_valid_days,
             _ => 0,
         };
-        let (title, intro, outro) = doc_texts(kind, crate::i18n::lang(), due);
+        let (title, intro, outro) = self.data.company.doc_text(kind.name(), crate::i18n::lang());
         let mut doc = Document {
             kind,
             title,
@@ -759,7 +770,7 @@ impl App {
 
     fn print_doc(&mut self, doc: &Document) {
         let bytes = crate::pdf::document_pdf(&self.data, doc);
-        let path = std::env::temp_dir().join(format!("OpenKontor {}", crate::pdf::file_name(doc)));
+        let path = std::env::temp_dir().join(format!("OpenKontor {}", crate::pdf::file_name(&self.data, doc)));
         match std::fs::write(&path, bytes) {
             Ok(()) => {
                 export::open_file(&path);
@@ -786,7 +797,7 @@ impl App {
             crate::pdf::document_pdf(&self.data, doc)
         };
         if let Some(path) = rfd::FileDialog::new()
-            .set_file_name(crate::pdf::file_name(doc))
+            .set_file_name(crate::pdf::file_name(&self.data, doc))
             .add_filter(t("PDF-Dokument"), &["pdf"])
             .save_file()
         {
@@ -818,46 +829,14 @@ impl App {
 }
 
 /// Default title, opening and closing text of a new document in a language.
-fn doc_texts(kind: DocKind, lang: Lang, _days: u32) -> (String, String, String) {
-    let l = |de| crate::i18n::t_in(lang, de);
-    match kind {
-        DocKind::Angebot => (
-            l("Angebot").into(),
-            l("Gerne unterbreiten wir Ihnen folgendes Angebot:").into(),
-            l("Wir freuen uns auf Ihren Auftrag.").into(),
-        ),
-        DocKind::Rechnung => (
-            l("Rechnung").into(),
-            l("Vielen Dank für Ihren Auftrag. Wir berechnen Ihnen folgende Leistungen:").into(),
-            l("Vielen Dank für die gute Zusammenarbeit.").into(),
-        ),
-        DocKind::Gutschrift => (l("Gutschrift").into(), l("Wir schreiben Ihnen gut:").into(), String::new()),
-        DocKind::Auftragsbestaetigung => (
-            l("Auftragsbestätigung").into(),
-            l("Vielen Dank für Ihren Auftrag. Wir bestätigen Ihnen folgende Leistungen:").into(),
-            l("Wir freuen uns auf die weitere Zusammenarbeit.").into(),
-        ),
-        DocKind::Lieferschein => (
-            l("Lieferschein").into(),
-            l("Wir liefern Ihnen:").into(),
-            l("Ware vollständig und in einwandfreiem Zustand erhalten:").into(),
-        ),
-        DocKind::Bestellung => (
-            l("Bestellung").into(),
-            l("Hiermit bestellen wir:").into(),
-            l("Bitte bestätigen Sie uns den Liefertermin.").into(),
-        ),
-    }
-}
-
 /// When the contact of a draft changes, untouched default texts switch to the contact's language.
-fn follow_contact_language(doc: &mut Document, lang: Lang) {
+fn follow_contact_language(company: &Company, doc: &mut Document, lang: Lang) {
     let unchanged = Lang::ALL.iter().any(|l| {
-        let (title, intro, outro) = doc_texts(doc.kind, *l, doc.due_days);
+        let (title, intro, outro) = company.doc_text(doc.kind.name(), *l);
         doc.title == title && doc.intro == intro && doc.outro == outro
     });
     if unchanged {
-        let (title, intro, outro) = doc_texts(doc.kind, lang, doc.due_days);
+        let (title, intro, outro) = company.doc_text(doc.kind.name(), lang);
         doc.title = title;
         doc.intro = intro;
         doc.outro = outro;

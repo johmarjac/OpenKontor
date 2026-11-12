@@ -242,7 +242,7 @@ impl App {
                 }
             } else {
                 let rec = ReminderRecord { level: r.level, date: self.today, fee: r.fee, due: deadline };
-                letters.push((crate::pdf::reminder_file_name(&doc, &rec), crate::pdf::reminder_pdf(&self.data, &doc, &rec)));
+                letters.push((crate::pdf::reminder_file_name(&self.data, &doc, &rec), crate::pdf::reminder_pdf(&self.data, &doc, &rec)));
                 if self.run(Op::RecordReminder(doc.id, rec)).is_err() {
                     letters.pop();
                 }

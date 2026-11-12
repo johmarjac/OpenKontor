@@ -465,8 +465,10 @@ fn address(street: &str, zip_city: &str, country: &str) -> String {
 
 /// File name of the XRechnung, e.g. "XRechnung RE-2026-0012.xml".
 pub fn file_name(doc: &Document) -> String {
-    let pdf = crate::pdf::file_name(doc);
-    let number = pdf.split_once(' ').map(|(_, n)| n).unwrap_or(&pdf).trim_end_matches(".pdf");
+    let number: String = if doc.number.is_empty() { "Entwurf".to_string() } else { doc.number.clone() }
+        .chars()
+        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .collect();
     format!("XRechnung {number}.xml")
 }
 

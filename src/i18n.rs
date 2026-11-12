@@ -879,6 +879,7 @@ mod tests {
             include_str!("app/storage.rs"),
             include_str!("app/projects.rs"),
             include_str!("app/extras.rs"),
+            include_str!("app/templates.rs"),
             include_str!("import.rs"),
             include_str!("server.rs"),
             include_str!("ui_kit.rs"),

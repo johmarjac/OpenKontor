@@ -183,7 +183,7 @@ impl App {
         }
         if post_only && let Some(r) = reminder(&draft, self.today) {
             let bytes = crate::pdf::reminder_pdf(&self.data, &doc, &r);
-            let path = std::env::temp_dir().join(crate::pdf::reminder_file_name(&doc, &r));
+            let path = std::env::temp_dir().join(crate::pdf::reminder_file_name(&self.data, &doc, &r));
             if self.run(Op::RecordReminder(doc.id, r)).is_ok() {
                 if std::fs::write(&path, bytes).is_ok() {
                     export::open_file(&path);
@@ -376,13 +376,13 @@ impl App {
                 Err(e) => self.error(tr(&e)),
             }
         }
-        ui.add_space(12.0);
-        self.settings_mail_templates(ui);
+        ui.add_space(8.0);
+        ui.label(muted(t("Die E-Mail-Texte und das Mahnwesen finden Sie unter „Vorlagen & Gestaltung“.")));
         ui.add_space(12.0);
         self.settings_inbox(ui);
     }
 
-    fn settings_mail_templates(&mut self, ui: &mut Ui) {
+    pub(super) fn settings_mail_templates(&mut self, ui: &mut Ui) {
         let can = self.backend.can_write();
         let st = &mut self.mail_state;
         let kind = *st.tpl_kind.get_or_insert(MailKind::Rechnung);
@@ -431,15 +431,7 @@ impl App {
                         restore = true;
                     }
                 });
-                egui::CollapsingHeader::new(t("Platzhalter")).show(ui, |ui| {
-                    egui::Grid::new("placeholders").num_columns(2).show(ui, |ui| {
-                        for (key, what) in mail::PLACEHOLDERS {
-                            ui.label(RichText::new(key).monospace());
-                            ui.label(muted(t(what)));
-                            ui.end_row();
-                        }
-                    });
-                });
+                super::templates::placeholder_list(ui);
             });
         });
         ui.add_space(12.0);

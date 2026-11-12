@@ -71,6 +71,16 @@ pub struct Company {
     /// Balance of the business account on a day, as start of the cash-flow forecast.
     pub bank_balance: Cents,
     pub bank_balance_date: Option<NaiveDate>,
+    /// How printed documents look: "" for all documents, or a kind ("Rechnung", "Mahnung" …).
+    pub pdf_layouts: BTreeMap<String, PdfLayout>,
+    /// The company's own titles, opening and closing texts per kind and language.
+    pub doc_texts: Vec<DocText>,
+    /// Text for {signatur} in e-mails.
+    pub email_signature: String,
+    /// How PDF files are named, e.g. "{art} {nummer}".
+    pub file_name_pattern: String,
+    /// How long new offers are valid.
+    pub offer_valid_days: u32,
 }
 
 /// The date part of a number.
@@ -341,6 +351,11 @@ impl Default for Company {
             cash_opening: 0,
             bank_balance: 0,
             bank_balance_date: None,
+            pdf_layouts: BTreeMap::new(),
+            doc_texts: Vec::new(),
+            email_signature: String::new(),
+            file_name_pattern: "{art} {nummer}".into(),
+            offer_valid_days: 30,
         }
     }
 }
@@ -2749,6 +2764,8 @@ impl Data {
                 l("Vielen Dank für die gute Zusammenarbeit.").to_string(),
             ),
         };
+        // The company's own texts win; {bezug} names the document this one comes from.
+        let (title, intro, outro) = self.company.own_doc_text(target.name(), lang).unwrap_or((title, intro, outro));
         let new_id = self.new_id();
         let mut doc = Document {
             id: new_id,
@@ -3792,6 +3809,8 @@ pub fn sample_data() -> Data {
     d.company.bank_balance_date = Some(t);
     d
 }
+
+include!("doc_templates.rs");
 
 #[cfg(test)]
 mod tests {

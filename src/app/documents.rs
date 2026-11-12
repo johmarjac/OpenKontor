@@ -520,7 +520,7 @@ impl App {
                         if doc.contact_id != before
                             && let Some(c) = self.data.contact(doc.contact_id)
                         {
-                            super::follow_contact_language(doc, c.language);
+                            super::follow_contact_language(&self.data.company, doc, c.language);
                         }
                         if doc.contact_id != before && doc.kind == DocKind::Rechnung {
                             doc.apply_term(&self.data.term_for(doc.contact_id));
@@ -838,110 +838,9 @@ impl App {
     }
 
     /// A small paper view of how the document will look when printed.
+    /// The document exactly as it will print.
     fn document_preview(&self, ui: &mut Ui, doc: &Document, width: f32) {
-        let c = &self.data.company;
-        let small = c.small_business;
-        let tot = doc.totals(small);
-        Frame::new()
-            .fill(Color32::WHITE)
-            .stroke(Stroke::new(1.0, BORDER))
-            .shadow(egui::Shadow {
-                offset: [0, 3],
-                blur: 12,
-                spread: 0,
-                color: Color32::from_black_alpha(22),
-            })
-            .inner_margin(Margin::same(22))
-            .show(ui, |ui| {
-                ui.set_width(width - 46.0);
-                ui.set_min_height((width - 46.0) * 1.35);
-                ui.spacing_mut().item_spacing.y = 3.0;
-                ui.label(RichText::new(&c.name).size(14.0).strong().color(ACCENT));
-                let (r, _) = ui.allocate_exact_size(vec2(width - 46.0, 2.0), egui::Sense::hover());
-                ui.painter().rect_filled(r, CornerRadius::ZERO, ACCENT);
-                ui.add_space(10.0);
-                ui.label(
-                    RichText::new(format!("{} · {} · {}", c.name, c.street, c.zip_city))
-                        .size(8.5)
-                        .color(MUTED)
-                        .underline(),
-                );
-                if let Some(k) = self.data.contact(doc.contact_id) {
-                    for line in [&k.company, &k.person, &k.street, &k.zip_city] {
-                        if !line.is_empty() {
-                            ui.label(RichText::new(line).size(11.0));
-                        }
-                    }
-                } else {
-                    ui.label(muted(t("Empfänger fehlt")).size(11.0));
-                }
-                ui.add_space(12.0);
-                ui.label(
-                    RichText::new(if doc.title.is_empty() { doc.kind.label() } else { &doc.title })
-                        .size(13.5)
-                        .strong(),
-                );
-                let number = if doc.number.is_empty() { t("ENTWURF").to_string() } else { doc.number.clone() };
-                ui.label(
-                    RichText::new(tf!("Nr. {} · Datum {}", number, fmt_date(doc.date)))
-                        .size(10.0)
-                        .color(MUTED),
-                );
-                ui.label(RichText::new(&doc.intro).size(10.5));
-                ui.add_space(6.0);
-                let inner = width - 46.0;
-                egui::Grid::new("pv_lines")
-                    .num_columns(3)
-                    .spacing([8.0, 3.0])
-                    .min_col_width(10.0)
-                    .show(ui, |ui| {
-                        ui.label(RichText::new(t("Bezeichnung")).size(9.5).strong());
-                        ui.label(RichText::new(t("Menge")).size(9.5).strong());
-                        ui.label(RichText::new(t("Gesamt")).size(9.5).strong());
-                        ui.end_row();
-                        for l in &doc.lines {
-                            ui.allocate_ui_with_layout(
-                                vec2(inner * 0.55, 14.0),
-                                Layout::left_to_right(Align::Center),
-                                |ui| ui.add(egui::Label::new(RichText::new(&l.text).size(10.0)).truncate()),
-                            );
-                            ui.label(RichText::new(format!("{} {}", fmt_qty(l.qty), l.unit)).size(10.0));
-                            ui.label(RichText::new(fmt_money_cur(crate::i18n::lang(), l.net(), doc.currency())).size(10.0));
-                            ui.end_row();
-                        }
-                    });
-                ui.add_space(6.0);
-                ui.with_layout(Layout::top_down(Align::Max), |ui| {
-                    ui.label(RichText::new(tf!("Netto {}", fmt_money_cur(crate::i18n::lang(), tot.net, doc.currency()))).size(10.5));
-                    if !small {
-                        for (rate, (_n, tax)) in &tot.by_rate {
-                            if *rate > 0 {
-                                ui.label(RichText::new(tf!("USt. {} % {}", rate, fmt_money_cur(crate::i18n::lang(), *tax, doc.currency()))).size(10.5));
-                            }
-                        }
-                    }
-                    ui.label(RichText::new(tf!("Gesamt {}", fmt_money_cur(crate::i18n::lang(), tot.gross, doc.currency()))).size(12.0).strong());
-                });
-                ui.add_space(6.0);
-                for line in payment_lines(doc, small, self.data.contact(doc.contact_id).map(|k| k.language).unwrap_or_default()) {
-                    ui.label(RichText::new(line).size(10.0));
-                }
-                ui.label(RichText::new(&doc.outro).size(10.5));
-                if small {
-                    ui.label(RichText::new(t("Gemäß § 19 UStG wird keine Umsatzsteuer berechnet.")).size(9.0).color(MUTED));
-                }
-                ui.add_space(16.0);
-                ui.separator();
-                ui.label(
-                    RichText::new(tf!("{} · {} · Steuer-Nr. {}", c.name, c.email, c.tax_number))
-                        .size(8.0)
-                        .color(MUTED),
-                );
-                ui.label(
-                    RichText::new(format!("{} · IBAN {} · BIC {}", c.bank, c.iban, c.bic))
-                        .size(8.0)
-                        .color(MUTED),
-                );
-            });
+        let pages = crate::pdf::document_preview(&self.data, doc);
+        super::pdf_view::show_pages(ui, &pages, width - 8.0);
     }
 }

@@ -20,6 +20,7 @@ impl App {
             ui.selectable_value(&mut self.settings_tab, SettingsTab::Benutzer, t("Benutzer & Passwort"));
             ui.selectable_value(&mut self.settings_tab, SettingsTab::Sicherheit, t("Sicherheit"));
             ui.selectable_value(&mut self.settings_tab, SettingsTab::Mandanten, t("Mandanten"));
+            ui.selectable_value(&mut self.settings_tab, SettingsTab::Vorlagen, t("Vorlagen & Gestaltung"));
             ui.selectable_value(&mut self.settings_tab, SettingsTab::Ablage, t("Belegablage"));
             ui.selectable_value(&mut self.settings_tab, SettingsTab::Daten, t("Verbindung & Datensicherung"));
             ui.selectable_value(&mut self.settings_tab, SettingsTab::Email, t("E-Mail"));
@@ -36,6 +37,7 @@ impl App {
             SettingsTab::Daten => self.settings_data(ui),
             SettingsTab::Sprache => self.settings_language(ui),
             SettingsTab::Email => self.settings_mail(ui),
+            SettingsTab::Vorlagen => self.settings_templates(ui),
         });
     }
 

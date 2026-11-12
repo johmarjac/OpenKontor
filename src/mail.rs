@@ -179,52 +179,12 @@ pub fn template(company: &Company, kind: MailKind, lang: Lang) -> (String, Strin
 }
 
 /// The placeholders a template may use, with an explanation.
-pub const PLACEHOLDERS: [(&str, &str); 12] = [
-    ("{anrede}", "Anrede mit Name des Ansprechpartners"),
-    ("{nummer}", "Belegnummer"),
-    ("{datum}", "Belegdatum"),
-    ("{betrag}", "Betrag brutto"),
-    ("{faellig}", "Fälligkeitsdatum"),
-    ("{zahlung}", "Zahlungsbedingungen mit Skonto-Fristen"),
-    ("{firma}", "Ihr Firmenname"),
-    ("{absender}", "Inhaber/in bzw. Absendername"),
-    ("{kunde}", "Name des Kunden"),
-    ("{gebuehr}", "Mahngebühr dieser Mahnung"),
-    ("{gesamt}", "Offener Betrag mit allen Mahngebühren"),
-    ("{neue_frist}", "Neue Zahlungsfrist der Mahnung"),
-];
+#[allow(unused_imports)]
+pub use crate::model::PLACEHOLDERS;
 
 /// Fills a template for a document. `fee` and `deadline` matter for reminders only.
 pub fn render(text: &str, data: &Data, doc: &Document, fee: Cents, deadline: chrono::NaiveDate) -> String {
-    let contact = data.contact(doc.contact_id);
-    let lang = contact.map(|k| k.language).unwrap_or_default();
-    let small = data.company.small_business;
-    let gross = doc.totals(small).gross;
-    let fees: Cents = doc.reminders.iter().map(|r| r.fee).sum::<Cents>() + fee;
-    let greeting = match (lang, contact.map(|k| k.person.trim()).unwrap_or("")) {
-        (Lang::De, "") => "Sehr geehrte Damen und Herren,".to_string(),
-        (Lang::De, name) => format!("Guten Tag {name},"),
-        (Lang::En, "") => "Dear Sir or Madam,".to_string(),
-        (Lang::En, name) => format!("Dear {name},"),
-    };
-    let c = &data.company;
-    let sender = if c.owner.trim().is_empty() { c.name.clone() } else { c.owner.clone() };
-    [
-        ("{anrede}", greeting),
-        ("{nummer}", doc.number.clone()),
-        ("{datum}", fmt_date_in(lang, doc.date)),
-        ("{betrag}", fmt_money_cur(lang, gross, doc.currency())),
-        ("{faellig}", fmt_date_in(lang, doc.due_date())),
-        ("{zahlung}", payment_lines(doc, small, lang).join("\n")),
-        ("{firma}", c.name.clone()),
-        ("{absender}", sender),
-        ("{kunde}", data.contact_name(doc.contact_id)),
-        ("{gebuehr}", fmt_money_cur(lang, fee, doc.currency())),
-        ("{gesamt}", fmt_money_cur(lang, gross + fees, doc.currency())),
-        ("{neue_frist}", fmt_date_in(lang, deadline)),
-    ]
-    .iter()
-    .fold(text.to_string(), |acc, (key, value)| acc.replace(key, value))
+    data.fill_text(text, doc, fee, deadline)
 }
 
 /// The reminder level that comes next for an invoice (0 = friendly reminder … 3 = final).
@@ -323,12 +283,12 @@ pub fn send(
 /// ZUGFeRD PDF, XRechnung XML plus a PDF copy, or just the PDF.
 pub fn document_files(data: &Data, doc: &Document) -> Result<Vec<(String, Vec<u8>)>, Vec<String>> {
     use crate::xrechnung::{EInvoiceFormat, Profile};
-    let pdf = (crate::pdf::file_name(doc), crate::pdf::document_pdf(data, doc));
+    let pdf = (crate::pdf::file_name(data, doc), crate::pdf::document_pdf(data, doc));
     if !matches!(doc.kind, DocKind::Rechnung | DocKind::Gutschrift) {
         return Ok(vec![pdf]);
     }
     Ok(match data.einvoice_format(doc.contact_id) {
-        EInvoiceFormat::Zugferd => vec![(crate::pdf::file_name(doc), crate::pdf::zugferd_pdf(data, doc)?)],
+        EInvoiceFormat::Zugferd => vec![(crate::pdf::file_name(data, doc), crate::pdf::zugferd_pdf(data, doc)?)],
         EInvoiceFormat::XRechnung => {
             let xml = crate::xrechnung::build(data, doc, Profile::XRechnung)?;
             vec![(crate::xrechnung::file_name(doc), xml.into_bytes()), pdf]
@@ -342,18 +302,18 @@ pub fn attachment_names(data: &Data, doc: &Document, kind: MailKind) -> Vec<Stri
     let mut names = Vec::new();
     if let MailKind::Mahnung(level) = kind {
         let r = ReminderRecord { level, date: today(), fee: 0, due: today() };
-        names.push(crate::pdf::reminder_file_name(doc, &r));
+        names.push(crate::pdf::reminder_file_name(data, doc, &r));
     }
     let einvoice = matches!(doc.kind, DocKind::Rechnung | DocKind::Gutschrift);
     match data.einvoice_format(doc.contact_id) {
         crate::xrechnung::EInvoiceFormat::XRechnung if einvoice => {
             names.push(crate::xrechnung::file_name(doc));
-            names.push(crate::pdf::file_name(doc));
+            names.push(crate::pdf::file_name(data, doc));
         }
         crate::xrechnung::EInvoiceFormat::Zugferd if einvoice => {
-            names.push(format!("{} (ZUGFeRD)", crate::pdf::file_name(doc)));
+            names.push(format!("{} (ZUGFeRD)", crate::pdf::file_name(data, doc)));
         }
-        _ => names.push(crate::pdf::file_name(doc)),
+        _ => names.push(crate::pdf::file_name(data, doc)),
     }
     names
 }
@@ -382,7 +342,7 @@ pub fn send_document(data: &mut Data, settings: &MailSettings, req: &SendRequest
             fee: req.fee.max(0),
             due: today + chrono::Duration::days(req.deadline_days as i64),
         };
-        attachments.push((crate::pdf::reminder_file_name(&doc, &r), crate::pdf::reminder_pdf(data, &doc, &r)));
+        attachments.push((crate::pdf::reminder_file_name(data, &doc, &r), crate::pdf::reminder_pdf(data, &doc, &r)));
         reminder = Some(r);
     }
     attachments.extend(document_files(data, &doc).map_err(|p| {
