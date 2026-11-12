@@ -25,10 +25,13 @@ pub struct MailSettingsState {
     pub tpl_lang: Lang,
     pub tpl_subject: String,
     pub tpl_body: String,
+    /// The check of the sender's domain: running, or its result.
+    pub domain_rx: Option<std::sync::mpsc::Receiver<Result<Vec<crate::maildomain::Finding>, String>>>,
+    pub domain: Option<Result<Vec<crate::maildomain::Finding>, String>>,
 }
 
 /// Common providers, so nobody has to look up server names.
-const PROVIDERS: [(&str, &str, u16, Security); 7] = [
+const PROVIDERS: [(&str, &str, u16, Security); 11] = [
     ("Microsoft 365 / Outlook", "smtp.office365.com", 587, Security::StartTls),
     ("Google Workspace / Gmail", "smtp.gmail.com", 587, Security::StartTls),
     ("IONOS", "smtp.ionos.de", 587, Security::StartTls),
@@ -36,6 +39,11 @@ const PROVIDERS: [(&str, &str, u16, Security); 7] = [
     ("GMX", "mail.gmx.net", 587, Security::StartTls),
     ("WEB.DE", "smtp.web.de", 587, Security::StartTls),
     ("Telekom (T-Online)", "securesmtp.t-online.de", 465, Security::Tls),
+    // Sending services for an own domain (e.g. when Cloudflare only forwards incoming mail).
+    ("Brevo (Versanddienst)", "smtp-relay.brevo.com", 587, Security::StartTls),
+    ("Mailjet (Versanddienst)", "in-v3.mailjet.com", 587, Security::StartTls),
+    ("SMTP2GO (Versanddienst)", "mail.smtp2go.com", 587, Security::StartTls),
+    ("Amazon SES (Frankfurt)", "email-smtp.eu-central-1.amazonaws.com", 587, Security::StartTls),
 ];
 
 impl App {
@@ -346,6 +354,7 @@ impl App {
                 ui.end_row();
             });
             ui.label(muted(t("Microsoft 365: Für das Postfach muss „Authentifiziertes SMTP“ erlaubt sein; bei Google ein App-Passwort verwenden.")));
+            ui.label(muted(t("Eigene Domain, deren E-Mails nur weitergeleitet werden (z. B. Cloudflare Email Routing)? Das bleibt so. Zum Versenden brauchen Sie zusätzlich einen Postausgangsserver, etwa einen Versanddienst wie Brevo oder Mailjet – „Domain prüfen“ zeigt, was bei Cloudflare einzutragen ist.")));
             super::settings_more::microsoft_app_editor(ui, "mail_ms", &mut s.microsoft, *password_set, "SMTP.SendAsApp");
             ui.add_space(6.0);
             ui.horizontal(|ui| {
@@ -357,7 +366,28 @@ impl App {
                 if ui.button(t("Test-E-Mail senden")).clicked() {
                     test = true;
                 }
+                let running = self.mail_state.domain_rx.is_some();
+                if ui.add_enabled(!running, egui::Button::new(t("Domain prüfen"))).on_hover_text(t("Prüft MX, SPF und DMARC der Absenderadresse im öffentlichen DNS.")).clicked() {
+                    let (from, host) = (s.from_address.clone(), s.host.clone());
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    let ctx = ui.ctx().clone();
+                    std::thread::spawn(move || {
+                        let _ = tx.send(crate::maildomain::check(&from, &host));
+                        ctx.request_repaint();
+                    });
+                    self.mail_state.domain_rx = Some(rx);
+                }
+                if running {
+                    ui.spinner();
+                }
             });
+            if let Some(rx) = &self.mail_state.domain_rx
+                && let Ok(result) = rx.try_recv()
+            {
+                self.mail_state.domain = Some(result);
+                self.mail_state.domain_rx = None;
+            }
+            domain_findings(ui, &self.mail_state.domain);
         });
         if save && let Some((s, _)) = &self.mail_state.loaded {
             let s = s.clone();
@@ -487,6 +517,38 @@ impl App {
             c.reminder_days = days;
             if self.run(Op::SaveCompany(c)).is_ok() {
                 self.info(t("Einstellungen zum Mahnwesen gespeichert."));
+            }
+        }
+    }
+}
+
+/// The result of the domain check, with the records to copy.
+fn domain_findings(ui: &mut Ui, result: &Option<Result<Vec<crate::maildomain::Finding>, String>>) {
+    let Some(result) = result else { return };
+    ui.add_space(6.0);
+    match result {
+        Err(e) => {
+            ui.label(RichText::new(tr(e)).color(RED));
+        }
+        Ok(findings) => {
+            for f in findings {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(RichText::new(if f.ok { "✔" } else { "!" }).strong().color(if f.ok { GREEN } else { RED }));
+                    ui.label(tr(&f.text));
+                });
+                if let Some((kind, name, value)) = &f.record {
+                    egui::Grid::new(("dns_record", name)).num_columns(3).spacing([10.0, 4.0]).show(ui, |ui| {
+                        ui.label(muted(kind.as_str()));
+                        ui.label(RichText::new(name).monospace());
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(value).monospace());
+                            if ui.small_button(t("Kopieren")).clicked() {
+                                ui.ctx().copy_text(value.clone());
+                            }
+                        });
+                        ui.end_row();
+                    });
+                }
             }
         }
     }

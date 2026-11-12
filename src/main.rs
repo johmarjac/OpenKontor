@@ -21,6 +21,7 @@ mod import;
 mod imap;
 mod inbox;
 mod mail;
+mod maildomain;
 mod model;
 mod oauth_mail;
 mod ocr;
