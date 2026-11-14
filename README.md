@@ -250,7 +250,11 @@ Apache-2.0-ähnlichen Lizenzen.
 ## Neue Version veröffentlichen
 
 Auf GitHub unter **Actions → „Release erstellen“ → „Run workflow“** die Versionsnummer
-eingeben (z. B. `0.2.0`). Alternativ ein Tag setzen: `git tag v0.2.0 && git push origin v0.2.0`.
+eingeben (z. B. `0.2.0`). Diese Nummer steht danach im Programm unten links, in den Einstellungen
+und in der Verfahrensdokumentation – `Cargo.toml` muss dafür nicht geändert werden. Andere
+GitHub-Läufe zeigen die Nummer aus `Cargo.toml` mit der Laufnummer (z. B. `0.1.0-build.42`),
+eigene Builds die Nummer aus `Cargo.toml`; mit `OPENKONTOR_VERSION=0.2.0 cargo build` lässt sie
+sich auch selbst vorgeben. Alternativ ein Tag setzen: `git tag v0.2.0 && git push origin v0.2.0`.
 
 GitHub baut dann alle Pakete (Windows x64/ARM, macOS Universal, Linux x64/ARM), legt die
 Release-Seite mit Prüfsummen an und veröffentlicht das Docker-Image

@@ -11,7 +11,7 @@ pub(super) fn route(state: &mut State, method: &Method, path: &str, query: &str,
             let sso = state.sso.as_ref().map(|v| v.cfg.info());
             return json_response(
                 200,
-                &serde_json::json!({ "name": state.name, "app": "OpenKontor", "sso": sso, "tenants": tenant_list(state), "version": env!("CARGO_PKG_VERSION") }),
+                &serde_json::json!({ "name": state.name, "app": "OpenKontor", "sso": sso, "tenants": tenant_list(state), "version": env!("APP_VERSION") }),
             );
         }
         (&Method::Post, "/api/login/sso") => return sso_login(state, body),

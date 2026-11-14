@@ -86,9 +86,13 @@ pub fn ecb_rate(currency: &str) -> Result<f64, String> {
 /// Where new versions are published.
 pub const RELEASES_API: &str = "https://api.github.com/repos/johmarjac/OpenKontor/releases/latest";
 
-/// Whether version `a` ("0.2.0" or "v0.2.0") is newer than `b`.
+/// Whether version `a` ("0.2.0" or "v0.2.0") is newer than `b`. A build suffix
+/// ("0.1.0-build.42") is ignored.
 pub fn is_newer(a: &str, b: &str) -> bool {
-    let parts = |v: &str| -> Vec<u32> { v.trim_start_matches('v').split('.').map(|p| p.parse().unwrap_or(0)).collect() };
+    let parts = |v: &str| -> Vec<u32> {
+        let core = v.trim_start_matches('v').split(['-', '+']).next().unwrap_or("");
+        core.split('.').map(|p| p.parse().unwrap_or(0)).collect()
+    };
     parts(a) > parts(b)
 }
 
@@ -109,7 +113,7 @@ pub fn check_for_update() -> std::sync::mpsc::Receiver<Option<(String, String)>>
             .call()
             .ok()
             .and_then(|mut r| r.body_mut().read_json::<Release>().ok())
-            .filter(|r| is_newer(&r.tag_name, env!("CARGO_PKG_VERSION")))
+            .filter(|r| is_newer(&r.tag_name, env!("APP_VERSION")))
             .map(|r| (r.tag_name.trim_start_matches('v').to_string(), r.html_url));
         let _ = tx.send(found);
     });
@@ -123,5 +127,7 @@ mod tests {
         assert!(super::is_newer("v0.2.0", "0.1.9"));
         assert!(super::is_newer("1.0.0", "0.9.12"));
         assert!(!super::is_newer("v0.1.0", "0.1.0"));
+        assert!(super::is_newer("v0.1.1", "0.1.0-build.42"));
+        assert!(!super::is_newer("v0.1.0", "0.1.0-build.42"));
     }
 }

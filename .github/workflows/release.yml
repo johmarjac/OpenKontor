@@ -52,6 +52,8 @@ jobs:
         run: |
           if [ -n "${{ github.event.inputs.version }}" ]; then V="${{ github.event.inputs.version }}"; else V="${GITHUB_REF_NAME#v}"; fi
           echo "VERSION=$V" >> "$GITHUB_ENV"
+          # Read by build.rs: the version shown bottom left in the program.
+          echo "OPENKONTOR_VERSION=$V" >> "$GITHUB_ENV"
           echo "PKG=OpenKontor-$V-${{ matrix.name }}" >> "$GITHUB_ENV"
 
       - uses: dtolnay/rust-toolchain@stable

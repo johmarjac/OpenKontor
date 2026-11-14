@@ -574,7 +574,7 @@ pub fn procedure_documentation(data: &Data, server: bool) -> Vec<u8> {
         ]),
         Paragraph("Tätigkeit des Unternehmens: …\nVerantwortlich für die Buchführung: …\nSteuerberatung: …".into()),
         Heading("2. Anwenderdokumentation".into()),
-        Paragraph(format!("Eingesetzte Software: OpenKontor (freie Software, Lizenz AGPL-3.0), Version {}. {mode}", env!("CARGO_PKG_VERSION"))),
+        Paragraph(format!("Eingesetzte Software: OpenKontor (freie Software, Lizenz AGPL-3.0), Version {}. {mode}", env!("APP_VERSION"))),
         Paragraph("Ausgangsrechnungen: Angebote, Auftragsbestätigungen, Lieferscheine, Rechnungen und Gutschriften werden in OpenKontor erstellt. Entwürfe erhalten beim Fertigstellen eine fortlaufende, lückenlose Nummer und können danach nicht mehr verändert werden; Korrekturen erfolgen ausschließlich über Gutschriften bzw. Stornorechnungen. Rechnungen werden als PDF, ZUGFeRD oder XRechnung erzeugt und per E-Mail oder Post versandt; der Versand wird am Beleg protokolliert.".into()),
         Paragraph("Eingangsrechnungen: Belege kommen über das Sammelpostfach (E-Mail), per Upload oder per Scan in den Belegeingang. Die Originaldatei wird unverändert gespeichert, ihr SHA-256-Fingerabdruck festgehalten. Die erkannten Angaben (Lieferant, Datum, Beträge) werden geprüft und als Ausgabe gebucht. Papierbelege werden … (ersetzendes Scannen: ja/nein, Verfahren …).".into()),
         Paragraph("Zahlungsverkehr: Kontoauszüge werden als CAMT- oder CSV-Datei eingelesen und den offenen Rechnungen bzw. Belegen zugeordnet. Barzahlungen werden im Kassenbuch erfasst; die Kasse wird täglich bzw. … abgeschlossen. Nach dem Abschluss sind Kassenbuchungen bis zu diesem Tag nicht mehr änderbar.".into()),

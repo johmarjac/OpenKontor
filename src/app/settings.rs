@@ -423,7 +423,7 @@ impl App {
         card(ui, |ui| {
             ui.set_width(ui.available_width().min(840.0));
             card_title(ui, t("Updates"));
-            ui.label(muted(tf!("Installierte Version: {}", env!("CARGO_PKG_VERSION"))));
+            ui.label(muted(tf!("Installierte Version: {}", env!("APP_VERSION"))));
             if ui.checkbox(&mut self.cfg.check_updates, t("Beim Start nach neuen Versionen suchen (GitHub)")).changed() {
                 self.cfg.save();
             }

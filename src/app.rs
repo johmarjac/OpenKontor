@@ -1232,7 +1232,7 @@ impl App {
         }
         ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
             ui.label(
-                RichText::new(tf!("Freie Software · Version {}", env!("CARGO_PKG_VERSION")))
+                RichText::new(tf!("Freie Software · Version {}", env!("APP_VERSION")))
                     .size(11.0)
                     .color(Color32::from_rgb(0x7f, 0x95, 0xab)),
             );
